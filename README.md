@@ -64,7 +64,11 @@ end goal — JS-compilable for an in-browser IDE.
   aowlsuggest's stylistic lint with `"pedantic": true` (trailing-whitespace +
   final-newline + BOM) or `"style": ["trailing-whitespace", "lf", …]` — the
   matching diagnostics then appear live and feed both the quick-fix and
-  `source.fixAll` actions.
+  `source.fixAll` actions. A repo that commits a
+  [`.aowlsuggest`](https://github.com/aoughwl/aowlsuggest#project-config--aowlsuggest)
+  config is honoured **automatically** — aowllsp passes each buffer's real path
+  as `--filename`, and aowlsuggest anchors config discovery there, so a project's
+  style policy flows into the editor with no `initializationOptions` at all.
 - **foldingRange** and **selectionRange** — indentation/word heuristics.
 - **cache pruning** — the per-module nimcache pool is bounded (LRU eviction on
   `didClose`), so it can't grow without limit.
