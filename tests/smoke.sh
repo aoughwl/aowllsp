@@ -23,6 +23,15 @@ proc mid(y: int): int = leaf(y) + leaf(y + 1)
 
 proc top(): int = mid(10)
 EOF
+cat > "$WORK/th.nim" <<'EOF'
+type
+  Animal = ref object of RootObj
+    name: string
+  Dog = ref object of Animal
+    breed: string
+  Cat = ref object of Animal
+    indoor: bool
+EOF
 cat > "$WORK/linky.nim" <<'EOF'
 import clean
 echo "linked"
@@ -37,7 +46,7 @@ def frame(o):
 clean = open(ROOT+"/clean.nim").read()
 bad   = open(ROOT+"/bad.nim").read()
 msgs=[
- {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"file://"+ROOT,"capabilities":{}}},
+ {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"file://"+ROOT,"capabilities":{},"initializationOptions":{"extraPaths":["/tmp/x"]}}},
  {"jsonrpc":"2.0","method":"initialized","params":{}},
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("bad.nim"),"languageId":"nim","version":1,"text":bad}}},
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("clean.nim"),"languageId":"nim","version":1,"text":clean}}},
@@ -45,6 +54,7 @@ msgs=[
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("linky.nim"),"languageId":"nim","version":1,"text":open(ROOT+"/linky.nim").read()}}},
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("messy.nim"),"languageId":"nim","version":1,"text":"let a = 1   \n\n\n\nlet b = 2"}}},
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("calls.nim"),"languageId":"nim","version":1,"text":open(ROOT+"/calls.nim").read()}}},
+ {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("th.nim"),"languageId":"nim","version":1,"text":open(ROOT+"/th.nim").read()}}},
  {"jsonrpc":"2.0","id":2,"method":"textDocument/definition","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":2,"character":8}}},
  {"jsonrpc":"2.0","id":3,"method":"textDocument/hover","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":2,"character":8}}},
  {"jsonrpc":"2.0","id":4,"method":"textDocument/references","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":0,"character":5},"context":{"includeDeclaration":True}}},
@@ -58,10 +68,14 @@ msgs=[
  {"jsonrpc":"2.0","id":13,"method":"textDocument/documentLink","params":{"textDocument":{"uri":uri("linky.nim")}}},
  {"jsonrpc":"2.0","id":14,"method":"textDocument/inlayHint","params":{"textDocument":{"uri":uri("clean.nim")},"range":{"start":{"line":0,"character":0},"end":{"line":10,"character":0}}}},
  {"jsonrpc":"2.0","id":15,"method":"textDocument/formatting","params":{"textDocument":{"uri":uri("messy.nim")},"options":{"tabSize":2,"insertSpaces":True}}},
+ {"jsonrpc":"2.0","id":20,"method":"textDocument/rangeFormatting","params":{"textDocument":{"uri":uri("messy.nim")},"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":12}},"options":{"tabSize":2,"insertSpaces":True}}},
  {"jsonrpc":"2.0","id":16,"method":"textDocument/diagnostic","params":{"textDocument":{"uri":uri("bad.nim")}}},
  {"jsonrpc":"2.0","id":17,"method":"textDocument/prepareCallHierarchy","params":{"textDocument":{"uri":uri("calls.nim")},"position":{"line":2,"character":5}}},
  {"jsonrpc":"2.0","id":18,"method":"callHierarchy/incomingCalls","params":{"item":{"name":"mid","kind":12,"uri":uri("calls.nim"),"range":{"start":{"line":2,"character":5},"end":{"line":2,"character":8}},"selectionRange":{"start":{"line":2,"character":5},"end":{"line":2,"character":8}},"data":{"uri":uri("calls.nim"),"line":2,"character":5}}}},
  {"jsonrpc":"2.0","id":19,"method":"callHierarchy/outgoingCalls","params":{"item":{"name":"mid","kind":12,"uri":uri("calls.nim"),"range":{"start":{"line":2,"character":5},"end":{"line":2,"character":8}},"selectionRange":{"start":{"line":2,"character":5},"end":{"line":2,"character":8}},"data":{"uri":uri("calls.nim"),"line":2,"character":5}}}},
+ {"jsonrpc":"2.0","id":21,"method":"textDocument/prepareTypeHierarchy","params":{"textDocument":{"uri":uri("th.nim")},"position":{"line":3,"character":2}}},
+ {"jsonrpc":"2.0","id":22,"method":"typeHierarchy/supertypes","params":{"item":{"name":"Dog","kind":5,"uri":uri("th.nim"),"range":{"start":{"line":3,"character":2},"end":{"line":3,"character":5}},"selectionRange":{"start":{"line":3,"character":2},"end":{"line":3,"character":5}},"data":{"uri":uri("th.nim"),"line":3,"character":2}}}},
+ {"jsonrpc":"2.0","id":23,"method":"typeHierarchy/subtypes","params":{"item":{"name":"Animal","kind":5,"uri":uri("th.nim"),"range":{"start":{"line":1,"character":2},"end":{"line":1,"character":8}},"selectionRange":{"start":{"line":1,"character":2},"end":{"line":1,"character":8}},"data":{"uri":uri("th.nim"),"line":1,"character":2}}}},
  {"jsonrpc":"2.0","id":9,"method":"shutdown"},{"jsonrpc":"2.0","method":"exit"},
 ]
 p=subprocess.run([BIN],input=b"".join(frame(m) for m in msgs),capture_output=True,timeout=180)
@@ -145,6 +159,11 @@ fm=resps.get(15) or []
 check(isinstance(fm,list) and len(fm)==1 and
       fm[0]["newText"]=="let a = 1\n\nlet b = 2\n",
       "formatting returns normalized edit, got %s"%json.dumps(fm))
+# rangeFormatting: only the in-range line's trailing ws is stripped
+rf=resps.get(20) or []
+check(isinstance(rf,list) and len(rf)==1 and
+      rf[0]["newText"].split("\n")[0]=="let a = 1",
+      "rangeFormatting strips in-range line, got %s"%json.dumps(rf))
 # pull diagnostics: a full report with the type error for bad.nim
 pd=resps.get(16) or {}
 check(isinstance(pd,dict) and pd.get("kind")=="full" and len(pd.get("items",[]))>=1,
@@ -157,9 +176,16 @@ check(any(c["from"]["name"]=="top" for c in ic),"incomingCalls: top calls mid, g
 oc=resps.get(19) or []
 check(any(c["to"]["name"]=="leaf" and len(c["fromRanges"])==2 for c in oc),
       "outgoingCalls: mid calls leaf x2, got %s"%json.dumps(oc))
+# type hierarchy: prepare Dog; supertypes=Animal; subtypes of Animal = Dog+Cat
+th=resps.get(21) or []
+check(isinstance(th,list) and th and th[0].get("name")=="Dog","prepareTypeHierarchy -> Dog")
+sup=resps.get(22) or []
+check(any(t["name"]=="Animal" for t in sup),"supertypes(Dog)=Animal, got %s"%json.dumps(sup))
+sub=resps.get(23) or []
+check(set(t["name"] for t in sub)=={"Dog","Cat"},"subtypes(Animal)=Dog+Cat, got %s"%json.dumps(sub))
 # capabilities advertise the new providers
 capset=set(k for k in (resps.get(1) or {}).get("capabilities",{}))
-for cap in ["documentSymbolProvider","completionProvider","semanticTokensProvider","renameProvider","codeActionProvider","signatureHelpProvider","codeLensProvider","documentLinkProvider","inlayHintProvider","documentFormattingProvider","diagnosticProvider","callHierarchyProvider"]:
+for cap in ["documentSymbolProvider","completionProvider","semanticTokensProvider","renameProvider","codeActionProvider","signatureHelpProvider","codeLensProvider","documentLinkProvider","inlayHintProvider","documentFormattingProvider","documentRangeFormattingProvider","diagnosticProvider","callHierarchyProvider","typeHierarchyProvider"]:
     check(cap in capset, "capability %s advertised"%cap)
 
 print("smoke: PASS" if not fail else "smoke: FAILURES above")

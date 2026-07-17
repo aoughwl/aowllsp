@@ -4,7 +4,7 @@ A **Language Server for Nimony, written in Nimony.** A ground-up nimony rewrite
 of the (Nim 2) `nimony-lsp`, so the whole editor stack is self-owned and — the
 end goal — JS-compilable for an in-browser IDE.
 
-> Status: **broad feature coverage.** ~32 LSP methods handled. Navigation and
+> Status: **broad feature coverage.** ~36 LSP methods handled. Navigation and
 > diagnostics run via the `nimony` subprocess; the symbol/token features read NIF
 > artifacts through the nimony-native [aowllens](https://github.com/aoughwl/aowllens).
 > A future browser build swaps both for in-process calls (see the seam below).
@@ -50,6 +50,13 @@ end goal — JS-compilable for an in-browser IDE.
 - **call hierarchy** — `prepareCallHierarchy` + **incomingCalls** (who calls
   this) and **outgoingCalls** (what this calls), read from the sem'd artifact's
   call edges via [aowllens](https://github.com/aoughwl/aowllens) `calls`.
+- **type hierarchy** — `prepareTypeHierarchy` + **supertypes** and **subtypes**,
+  read from the artifact's `object of` inheritance edges via `aowllens types`.
+- **range formatting** (`textDocument/rangeFormatting`) — formats only the
+  selected lines, delegated to `aowlfmt --range` (still gate-verified).
+- **initializationOptions** — the editor can override the tool paths
+  (`nimonyExe` / `aowlsuggestExe` / `aowllensExe` / `aowlfmtExe`) and
+  `extraPaths` per workspace; anything omitted keeps its env/default.
 - **foldingRange** and **selectionRange** — indentation/word heuristics.
 - **cache pruning** — the per-module nimcache pool is bounded (LRU eviction on
   `didClose`), so it can't grow without limit.

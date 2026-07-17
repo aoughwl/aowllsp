@@ -32,3 +32,20 @@ proc formattingEdits*(cfg: Config; bufferText: string): string =
   let rng = mkRange(0, 0, endLine, 0)
   result = "[{\"range\":" & rangeJson(rng) & ",\"newText\":" &
     ajson.jStr(formatted) & "}]"
+
+proc rangeFormattingEdits*(cfg: Config; bufferText: string;
+                           loLine, hiLine: int): string =
+  ## Format only lines [loLine, hiLine] (0-based, inclusive) via
+  ## `aowlfmt --stdin --range:LO,HI` (aowlfmt uses 1-based inclusive lines and
+  ## still gate-verifies the whole document). Returns a whole-document TextEdit,
+  ## or `[]` when unavailable/unchanged.
+  if cfg.aowlfmtExe.len == 0 or bufferText.len == 0: return "[]"
+  let arg = "--range:" & $(loLine + 1) & "," & $(hiLine + 1)
+  let cap = runWithInput(cfg.aowlfmtExe, @["--stdin", arg], bufferText, "")
+  if not cap.ok: return "[]"
+  let formatted = cap.output
+  if formatted == bufferText: return "[]"
+  let endLine = lineCount(bufferText)
+  let rng = mkRange(0, 0, endLine, 0)
+  result = "[{\"range\":" & rangeJson(rng) & ",\"newText\":" &
+    ajson.jStr(formatted) & "}]"

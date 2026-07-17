@@ -14,7 +14,7 @@ import std/[syncio, json, tables, strutils]
 import aowlkit/json as kjson
 import framing, protocol, uris, state, document, diagnostics, idetools, syntaxdiag
 import driver, symbols, completion, codeactions, semtokens, structure, renamehl
-import hints, typeinfo, formatting, callhier
+import hints, typeinfo, formatting, callhier, typehier
 
 const serverVersion = "0.1.0"
 
@@ -31,7 +31,22 @@ proc parseHeader(root: JsonNode; meth: var string; hasId: var bool;
       else: idJson = $v.getInt
     else: discard
 
-proc parseInitialize(root: JsonNode; rootUri: var string) =
+proc applyInitOptions(v2: JsonNode; cfg: var Config) =
+  ## Read `initializationOptions` — the editor's per-workspace overrides for the
+  ## tool paths and search paths. Anything absent keeps its env/default value.
+  for k3, v3 in pairs(v2):
+    case k3
+    of "nimonyExe": cfg.nimonyExe = v3.getStr
+    of "aowlsuggestExe": cfg.aowlsuggestExe = v3.getStr
+    of "aowllensExe": cfg.aowllensExe = v3.getStr
+    of "aowlfmtExe": cfg.aowlfmtExe = v3.getStr
+    of "extraPaths":
+      var xs: seq[string] = @[]
+      for el in items(v3): xs.add el.getStr
+      cfg.extraPaths = xs
+    else: discard
+
+proc parseInitialize(root: JsonNode; rootUri: var string; cfg: var Config) =
   for k, v in pairs(root):
     if k == "params":
       for k2, v2 in pairs(v):
@@ -39,6 +54,7 @@ proc parseInitialize(root: JsonNode; rootUri: var string) =
         of "rootUri": rootUri = v2.getStr
         of "rootPath":
           if rootUri.len == 0: rootUri = pathToUri(v2.getStr)
+        of "initializationOptions": applyInitOptions(v2, cfg)
         else: discard
 
 proc parseDidOpen(root: JsonNode; uri, langId, text: var string; version: var int) =
@@ -306,7 +322,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
   case meth
   of "initialize":
     var rootUri = ""
-    parseInitialize(tree.root, rootUri)
+    parseInitialize(tree.root, rootUri, s.config)
     s.rootUri = rootUri
     if rootUri.len > 0:
       s.config.projectRoot = uriToPath(rootUri)
@@ -336,6 +352,8 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
       "\"documentFormattingProvider\":true," &
       "\"diagnosticProvider\":{\"interFileDependencies\":true,\"workspaceDiagnostics\":false}," &
       "\"callHierarchyProvider\":true," &
+      "\"typeHierarchyProvider\":true," &
+      "\"documentRangeFormattingProvider\":true," &
       "\"codeActionProvider\":true," &
       "\"renameProvider\":{\"prepareProvider\":true}," &
       "\"foldingRangeProvider\":true," &
@@ -587,6 +605,42 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
           docText(s, uri)))
       else:
         sendResult(idJson, "[]")
+  of "textDocument/prepareTypeHierarchy":
+    var uri = ""
+    var line = 0
+    var ch = 0
+    parseDocPos(tree.root, uri, line, ch)
+    if hasId:
+      sendResult(idJson, prepareTypeHierarchy(s.config, uriToPath(uri),
+        pos(line, ch), docText(s, uri)))
+  of "typeHierarchy/supertypes":
+    var uri = ""
+    var line = 0
+    var ch = 0
+    parseCallItemData(tree.root, uri, line, ch)
+    if hasId:
+      if uri.len > 0:
+        sendResult(idJson, supertypesJson(s.config, uri, line, ch))
+      else:
+        sendResult(idJson, "[]")
+  of "typeHierarchy/subtypes":
+    var uri = ""
+    var line = 0
+    var ch = 0
+    parseCallItemData(tree.root, uri, line, ch)
+    if hasId:
+      if uri.len > 0:
+        sendResult(idJson, subtypesJson(s.config, uri, line, ch))
+      else:
+        sendResult(idJson, "[]")
+  of "textDocument/rangeFormatting":
+    var uri = ""
+    var loLine = 0
+    var hiLine = 1000000000
+    parseCodeActionRange(tree.root, uri, loLine, hiLine)
+    if hasId:
+      sendResult(idJson, rangeFormattingEdits(s.config, docText(s, uri),
+        loLine, hiLine))
   else:
     if hasId:
       sendResult(idJson, "null")
