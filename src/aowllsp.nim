@@ -14,7 +14,7 @@ import std/[syncio, json, tables, strutils]
 import aowlkit/json as kjson
 import framing, protocol, uris, state, document, diagnostics, idetools, syntaxdiag
 import driver, symbols, completion, codeactions, semtokens, structure, renamehl
-import hints
+import hints, typeinfo
 
 const serverVersion = "0.1.0"
 
@@ -296,6 +296,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
       "\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]}," &
       "\"codeLensProvider\":{\"resolveProvider\":true}," &
       "\"documentLinkProvider\":{\"resolveProvider\":false}," &
+      "\"inlayHintProvider\":true," &
       "\"codeActionProvider\":true," &
       "\"renameProvider\":{\"prepareProvider\":true}," &
       "\"foldingRangeProvider\":true," &
@@ -493,6 +494,14 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     parseUriOnly(tree.root, uri)
     if hasId:
       sendResult(idJson, documentLinksJson(s.config, uriToPath(uri),
+        docText(s, uri)))
+  of "textDocument/inlayHint":
+    var uri = ""
+    var loLine = 0
+    var hiLine = 1000000000
+    parseCodeActionRange(tree.root, uri, loLine, hiLine)
+    if hasId:
+      sendResult(idJson, inlayHintsJson(s.config, uriToPath(uri),
         docText(s, uri)))
   else:
     if hasId:
