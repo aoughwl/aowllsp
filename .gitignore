@@ -1,0 +1,4 @@
+/bin/
+/nimcache/
+/tests/_work/
+__pycache__/
