@@ -4,15 +4,14 @@ A **Language Server for Nimony, written in Nimony.** A ground-up nimony rewrite
 of the (Nim 2) `nimony-lsp`, so the whole editor stack is self-owned and — the
 end goal — JS-compilable for an in-browser IDE.
 
-> Status: **Phase 1.** Lifecycle, full-text document sync, diagnostics, and
-> navigation (definition / references / hover) are working. The in-process
-> semantic-index features (completion, semantic tokens, call/type hierarchy)
-> land in later phases, reading NIF through a nimony-native reader instead of
-> shelling out.
+> Status: **broad feature coverage.** ~23 LSP methods handled. Navigation and
+> diagnostics run via the `nimony` subprocess; the symbol/token features read NIF
+> artifacts through the nimony-native [aowllens](https://github.com/aoughwl/aowllens).
+> A future browser build swaps both for in-process calls (see the seam below).
 
 ## What works today
 
-- **LSP lifecycle** — `initialize` (advertising the capabilities below),
+- **LSP lifecycle** — `initialize` (advertising every capability below),
   `shutdown` / `exit`.
 - **Document sync** — `didOpen` / `didChange` (full sync) / `didSave` /
   `didClose`, with UTF-8 ↔ UTF-16 position mapping (LSP columns are UTF-16).
@@ -20,11 +19,20 @@ end goal — JS-compilable for an in-browser IDE.
   lines as `relatedInformation`) **plus** recovering *syntax* diagnostics from
   [aowlsuggest](https://github.com/aoughwl/aowlsuggest) over the **live buffer**:
   where `nimony check` aborts at the first syntax error and only sees the saved
-  file, aowlsuggest recovers past every error and reads the unsaved buffer, so
-  you see all of them as you type.
-- **Go to definition**, **find references** (across open documents), and
-  **hover** (shows the definition's source line) — via `nimony check
-  --def/--usages` (idetools).
+  file, aowlsuggest recovers past every error and reads the unsaved buffer.
+- **Navigation** — go to **definition**, **declaration**, **typeDefinition**,
+  **implementation**, find **references**, **documentHighlight**, and **hover**,
+  via `nimony check --def/--usages` (idetools).
+- **Symbols** — **documentSymbol** and **workspaceSymbol**, from `aowllens decls`.
+- **completion** — module symbols filtered by the identifier prefix under the
+  cursor (via `aowllens decls`/`index`).
+- **codeAction** — quick-fixes delegated to `aowlsuggest` (its recovering-syntax
+  fixes with "did you mean" alternatives).
+- **semanticTokens/full** — declaration-site highlighting from `aowllens decls`.
+- **rename** / **prepareRename** — WorkspaceEdit across every reference.
+- **foldingRange** and **selectionRange** — indentation/word heuristics.
+- **cache pruning** — the per-module nimcache pool is bounded (LRU eviction on
+  `didClose`), so it can't grow without limit.
 
 ## Architecture — the subprocess seam
 

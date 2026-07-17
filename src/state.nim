@@ -7,6 +7,7 @@ type
   Config* = object
     nimonyExe*: string        ## path to the `nimony` binary
     aowlsuggestExe*: string   ## path to `aowlsuggest` (recovering syntax diags); "" = off
+    aowllensExe*: string      ## path to `aowllens` (NIF artifact reader); "" = off
     extraPaths*: seq[string]   ## extra --path entries
     projectRoot*: string       ## workspace root (filesystem path)
 
@@ -27,6 +28,7 @@ proc defaultConfig*(): Config =
   Config(
     nimonyExe: getEnvOr("NIMONY_EXE", "/home/savant/nimony/bin/nimony"),
     aowlsuggestExe: getEnvOr("AOWLSUGGEST", "/home/savant/aowlsuggest/bin/aowlsuggest"),
+    aowllensExe: getEnvOr("AOWLLENS", "/home/savant/aowllens/bin/aowllens"),
     extraPaths: @[],
     projectRoot: "")
 

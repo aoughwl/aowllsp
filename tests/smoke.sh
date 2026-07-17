@@ -34,6 +34,10 @@ msgs=[
  {"jsonrpc":"2.0","id":2,"method":"textDocument/definition","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":2,"character":8}}},
  {"jsonrpc":"2.0","id":3,"method":"textDocument/hover","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":2,"character":8}}},
  {"jsonrpc":"2.0","id":4,"method":"textDocument/references","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":0,"character":5},"context":{"includeDeclaration":True}}},
+ {"jsonrpc":"2.0","id":5,"method":"textDocument/documentSymbol","params":{"textDocument":{"uri":uri("clean.nim")}}},
+ {"jsonrpc":"2.0","id":6,"method":"textDocument/completion","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":2,"character":11}}},
+ {"jsonrpc":"2.0","id":7,"method":"textDocument/semanticTokens/full","params":{"textDocument":{"uri":uri("clean.nim")}}},
+ {"jsonrpc":"2.0","id":8,"method":"textDocument/rename","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":0,"character":5},"newName":"welcome"}},
  {"jsonrpc":"2.0","id":9,"method":"shutdown"},{"jsonrpc":"2.0","method":"exit"},
 ]
 p=subprocess.run([BIN],input=b"".join(frame(m) for m in msgs),capture_output=True,timeout=180)
@@ -77,6 +81,24 @@ check("proc greet" in json.dumps(hv),"hover shows decl line")
 rf=resps.get(4) or []
 lines=sorted(set(r["range"]["start"]["line"] for r in rf))
 check(0 in lines and 2 in lines,"references include decl+usage, got %s"%lines)
+# documentSymbol lists greet
+ds=resps.get(5) or []
+check(any(s.get("name")=="greet" for s in ds),"documentSymbol includes greet")
+# completion returns items
+co=resps.get(6) or {}
+check(isinstance(co,dict) and len(co.get("items",[]))>0,"completion returns items")
+# semanticTokens returns a data array (multiple of 5)
+st=resps.get(7) or {}
+d=st.get("data",[]) if isinstance(st,dict) else []
+check(len(d)>0 and len(d)%5==0,"semanticTokens data is a non-empty multiple of 5, got %d"%len(d))
+# rename produces a WorkspaceEdit touching >=1 occurrence
+rn=resps.get(8) or {}
+edits=sum(len(v) for v in (rn.get("changes",{}) or {}).values()) if isinstance(rn,dict) else 0
+check(edits>=1,"rename produces >=1 edit, got %d"%edits)
+# capabilities advertise the new providers
+capset=set(k for k in (resps.get(1) or {}).get("capabilities",{}))
+for cap in ["documentSymbolProvider","completionProvider","semanticTokensProvider","renameProvider","codeActionProvider"]:
+    check(cap in capset, "capability %s advertised"%cap)
 
 print("smoke: PASS" if not fail else "smoke: FAILURES above")
 sys.exit(fail)

@@ -13,6 +13,7 @@
 import std/[syncio, json, tables, strutils]
 import aowlkit/json as kjson
 import framing, protocol, uris, state, document, diagnostics, idetools, syntaxdiag
+import driver, symbols, completion, codeactions, semtokens, structure, renamehl
 
 const serverVersion = "0.1.0"
 
@@ -89,6 +90,65 @@ proc parseDocPos(root: JsonNode; uri: var string; line, character: var int) =
             of "character": character = int(v3.getInt)
             else: discard
 
+proc parseCodeActionRange(root: JsonNode; uri: var string; loLine, hiLine: var int) =
+  for k, v in pairs(root):
+    if k == "params":
+      for k2, v2 in pairs(v):
+        if k2 == "textDocument":
+          for k3, v3 in pairs(v2):
+            if k3 == "uri": uri = v3.getStr
+        elif k2 == "range":
+          for k3, v3 in pairs(v2):
+            if k3 == "start":
+              for k4, v4 in pairs(v3):
+                if k4 == "line": loLine = int(v4.getInt)
+            elif k3 == "end":
+              for k4, v4 in pairs(v3):
+                if k4 == "line": hiLine = int(v4.getInt)
+
+proc parseRename(root: JsonNode; uri: var string; line, character: var int;
+                 newName: var string) =
+  for k, v in pairs(root):
+    if k == "params":
+      for k2, v2 in pairs(v):
+        case k2
+        of "textDocument":
+          for k3, v3 in pairs(v2):
+            if k3 == "uri": uri = v3.getStr
+        of "position":
+          for k3, v3 in pairs(v2):
+            case k3
+            of "line": line = int(v3.getInt)
+            of "character": character = int(v3.getInt)
+            else: discard
+        of "newName": newName = v2.getStr
+        else: discard
+
+proc parseQuery(root: JsonNode; query: var string) =
+  for k, v in pairs(root):
+    if k == "params":
+      for k2, v2 in pairs(v):
+        if k2 == "query": query = v2.getStr
+
+proc parseSelectionPositions(root: JsonNode; uri: var string;
+                             positions: var seq[Position]) =
+  for k, v in pairs(root):
+    if k == "params":
+      for k2, v2 in pairs(v):
+        if k2 == "textDocument":
+          for k3, v3 in pairs(v2):
+            if k3 == "uri": uri = v3.getStr
+        elif k2 == "positions":
+          for el in items(v2):
+            var line = 0
+            var ch = 0
+            for k3, v3 in pairs(el):
+              case k3
+              of "line": line = int(v3.getInt)
+              of "character": ch = int(v3.getInt)
+              else: discard
+            positions.add pos(line, ch)
+
 # ── responses ────────────────────────────────────────────────────────────────
 
 proc sendResult(idJson, resultJson: string) =
@@ -144,6 +204,16 @@ proc openDocuments(s: ServerState): seq[string] =
   for uri, doc in pairs(s.docs):
     result.add uriToPath(uri)
 
+proc docText(s: ServerState; uri: string): string =
+  if s.docs.hasKey(uri): s.docs.getOrDefault(uri).text else: ""
+
+proc docWordLen(s: ServerState; uri: string; p: Position): int =
+  if s.docs.hasKey(uri):
+    let d = s.docs.getOrDefault(uri)
+    wordAt(d, p).len
+  else:
+    0
+
 proc sourceLine(s: ServerState; uri: string; lineNo: int): string =
   ## The text of line `lineNo` (0-based) for `uri` — from the open buffer if we
   ## have it, else from disk.
@@ -182,11 +252,30 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     if rootUri.len > 0:
       s.config.projectRoot = uriToPath(rootUri)
     s.initialized = true
+    # semantic-tokens legend from the module's exported type list
+    var legend = "["
+    for i in 0 ..< semTokenTypes.len:
+      if i > 0: legend.add ","
+      legend.add kjson.jStr(semTokenTypes[i])
+    legend.add "]"
     sendResult(idJson, "{\"capabilities\":{" &
       "\"textDocumentSync\":1," &
       "\"definitionProvider\":true," &
+      "\"declarationProvider\":true," &
+      "\"typeDefinitionProvider\":true," &
+      "\"implementationProvider\":true," &
       "\"referencesProvider\":true," &
-      "\"hoverProvider\":true}," &
+      "\"documentHighlightProvider\":true," &
+      "\"hoverProvider\":true," &
+      "\"documentSymbolProvider\":true," &
+      "\"workspaceSymbolProvider\":true," &
+      "\"completionProvider\":{\"triggerCharacters\":[\".\",\"(\"]}," &
+      "\"codeActionProvider\":true," &
+      "\"renameProvider\":{\"prepareProvider\":true}," &
+      "\"foldingRangeProvider\":true," &
+      "\"selectionRangeProvider\":true," &
+      "\"semanticTokensProvider\":{\"legend\":{\"tokenTypes\":" & legend &
+        ",\"tokenModifiers\":[]},\"full\":true}}," &
       "\"serverInfo\":{\"name\":\"aowllsp\",\"version\":\"" & serverVersion & "\"}}")
   of "initialized":
     discard
@@ -226,6 +315,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
       closeDoc(s, uri)
       sendNotification("textDocument/publishDiagnostics",
         "{\"uri\":" & kjson.jStr(uri) & ",\"diagnostics\":[]}")
+      pruneCaches(s.config)   # bound the per-module nimcache pool
   of "textDocument/definition":
     var uri = ""
     var line = 0
@@ -259,6 +349,92 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
             "{\"contents\":{\"kind\":\"markdown\",\"value\":" & kjson.jStr(md) & "}}")
         else:
           sendResult(idJson, "null")
+      else:
+        sendResult(idJson, "null")
+  of "textDocument/declaration", "textDocument/typeDefinition",
+     "textDocument/implementation":
+    # Best-effort: nimony idetools resolves the definition; declaration/type/impl
+    # all fall back to it.
+    var uri = ""
+    var line = 0
+    var ch = 0
+    parseDocPos(tree.root, uri, line, ch)
+    if hasId:
+      let locs = definition(s.config, uriToPath(uri), pos(line, ch))
+      sendResult(idJson, locationsJson(locs))
+  of "textDocument/documentHighlight":
+    var uri = ""
+    var line = 0
+    var ch = 0
+    parseDocPos(tree.root, uri, line, ch)
+    if hasId:
+      let wlen = docWordLen(s, uri, pos(line, ch))
+      sendResult(idJson, documentHighlightsJson(s.config, uriToPath(uri), uri,
+        pos(line, ch), wlen))
+  of "textDocument/documentSymbol":
+    var uri = ""
+    parseUriOnly(tree.root, uri)
+    if hasId:
+      sendResult(idJson, documentSymbols(s.config, uriToPath(uri)))
+  of "workspace/symbol":
+    var query = ""
+    parseQuery(tree.root, query)
+    if hasId:
+      sendResult(idJson, workspaceSymbols(s.config, query))
+  of "textDocument/completion":
+    var uri = ""
+    var line = 0
+    var ch = 0
+    parseDocPos(tree.root, uri, line, ch)
+    if hasId:
+      sendResult(idJson, completions(s.config, uriToPath(uri), line, ch,
+        docText(s, uri)))
+  of "textDocument/codeAction":
+    var uri = ""
+    var loLine = 0
+    var hiLine = 1000000000
+    parseCodeActionRange(tree.root, uri, loLine, hiLine)
+    if hasId:
+      sendResult(idJson, codeActionsFor(s.config, uriToPath(uri),
+        docText(s, uri), loLine, hiLine))
+  of "textDocument/semanticTokens/full":
+    var uri = ""
+    parseUriOnly(tree.root, uri)
+    if hasId:
+      sendResult(idJson, semanticTokensFull(s.config, uriToPath(uri)))
+  of "textDocument/foldingRange":
+    var uri = ""
+    parseUriOnly(tree.root, uri)
+    if hasId:
+      sendResult(idJson, foldingRanges(docText(s, uri)))
+  of "textDocument/selectionRange":
+    var uri = ""
+    var positions: seq[Position] = @[]
+    parseSelectionPositions(tree.root, uri, positions)
+    if hasId:
+      sendResult(idJson, selectionRanges(docText(s, uri), positions))
+  of "textDocument/prepareRename":
+    var uri = ""
+    var line = 0
+    var ch = 0
+    parseDocPos(tree.root, uri, line, ch)
+    if hasId:
+      let wlen = docWordLen(s, uri, pos(line, ch))
+      if wlen > 0:
+        sendResult(idJson, rangeJson(mkRange(line, ch, line, ch + wlen)))
+      else:
+        sendResult(idJson, "null")
+  of "textDocument/rename":
+    var uri = ""
+    var line = 0
+    var ch = 0
+    var newName = ""
+    parseRename(tree.root, uri, line, ch, newName)
+    if hasId:
+      let wlen = docWordLen(s, uri, pos(line, ch))
+      if wlen > 0 and newName.len > 0:
+        sendResult(idJson, renameEditJson(s.config, uriToPath(uri),
+          pos(line, ch), wlen, newName, openDocuments(s)))
       else:
         sendResult(idJson, "null")
   else:

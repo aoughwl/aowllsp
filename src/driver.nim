@@ -47,6 +47,80 @@ proc cacheRoot(cfg: Config): string =
 proc moduleCacheDir*(cfg: Config; canonName: string): string =
   cacheRoot(cfg) & "/" & mangle(canonName)
 
+proc moduleArtifacts*(cfg: Config; file, ext: string): seq[string] =
+  ## Every artifact matching `ext` (e.g. ".s.nif", ".s.idx.nif") in the file's
+  ## per-module nimcache. Empty when nothing has been checked yet.
+  result = @[]
+  let dir = moduleCacheDir(cfg, canonFile(cfg, file))
+  if not dirExists(dir): return
+  try:
+    for kind, p in walkDir(path(dir)):
+      if kind == pcFile:
+        let ps = $p
+        if endsWith(ps, ext): result.add ps
+  except:
+    discard
+
+proc mainArtifact*(cfg: Config; file, ext: string): string =
+  ## Best-effort single artifact for `file` (the newest matching `ext`), or "".
+  let arts = moduleArtifacts(cfg, file, ext)
+  result = ""
+  var best = 0'i64
+  for i in 0 ..< arts.len:
+    var mt = 0'i64
+    try: mt = getLastModificationTime(arts[i])
+    except: mt = 0'i64
+    if result.len == 0 or mt >= best:
+      best = mt; result = arts[i]
+
+proc pruneCaches*(cfg: Config; budgetBytes = 1_000_000_000) =
+  ## Bound the nimcache/lsp pool: if it exceeds `budgetBytes`, evict whole
+  ## per-module cache dirs oldest-first (by mtime) until back under budget.
+  ## Prevents the per-module caches from growing without limit.
+  let base = cacheRoot(cfg)
+  if not dirExists(base): return
+  try:
+    var dirs: seq[string] = @[]
+    var sizes: seq[int] = @[]
+    var recency: seq[int64] = @[]
+    var total = 0
+    for kind, p in walkDir(path(base)):
+      if kind != pcDir: continue
+      let d = $p
+      var sz = 0
+      try:
+        for k2, f in walkDir(path(d)):
+          if k2 == pcFile:
+            try: sz += int(getFileSize($f))
+            except: discard
+      except: discard
+      var mt = 0'i64
+      try: mt = getLastModificationTime(d)
+      except: mt = 0'i64
+      dirs.add d; sizes.add sz; recency.add mt; total += sz
+    if total <= budgetBytes: return
+    # selection sort by recency ascending (oldest first); evict until under budget
+    var idx: seq[int] = @[]
+    for i in 0 ..< dirs.len: idx.add i
+    for a in 0 ..< idx.len:
+      var best = a
+      for b in a + 1 ..< idx.len:
+        if recency[idx[b]] < recency[idx[best]]: best = b
+      let va = idx[a]
+      let vb = idx[best]
+      idx[a] = vb
+      idx[best] = va
+    for k in 0 ..< idx.len:
+      if total <= budgetBytes: break
+      let i = idx[k]
+      try:
+        removeDir(path(dirs[i]))
+        total -= sizes[i]
+      except:
+        discard
+  except:
+    discard
+
 proc run*(cfg: Config; sub, file: string; track: seq[string] = @[]): CaptureResult =
   ## Run `nimony <sub> --nimcache:<per-module> [--path ..] [track ..] <file>`.
   if cfg.nimonyExe.len == 0:
