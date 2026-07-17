@@ -101,6 +101,25 @@ proc nthLine(text: string; n: int): string =
     inc cur
   return ""
 
+proc renderAt*(cfg: Config; file: string; line: int): string =
+  ## The `aowllens render` text of the declaration on 0-based `line` of `file`,
+  ## or "" if none. Used to give hover the fully-resolved signature/type instead
+  ## of the raw source line (procs show their full signature; bindings show the
+  ## inferred type).
+  let decls = fileDecls(cfg, file)
+  var name = ""
+  for i in 0 ..< decls.len:
+    if decls[i].line == line:
+      name = decls[i].name
+      break
+  if name.len == 0: return ""
+  let snif = mainArtifact(cfg, file, ".s.nif")
+  let renders = runRender(cfg, snif)
+  for j in 0 ..< renders.len:
+    if renders[j].name == name:
+      return renders[j].render
+  return ""
+
 proc inlayHintsJson*(cfg: Config; file, bufferText: string): string =
   ## Inlay `: type` hints for every un-annotated let/var/const in `file`.
   let snif = mainArtifact(cfg, file, ".s.nif")

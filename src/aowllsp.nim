@@ -369,7 +369,12 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
       # empty, so the declaration line itself is the useful tooltip).
       let locs = definition(s.config, uriToPath(uri), pos(line, ch), docText(s, uri))
       if locs.len > 0:
-        let dline = strip(sourceLine(s, locs[0].uri, locs[0].rng.start.line))
+        # Prefer the fully-resolved render (proc signature / inferred type) from
+        # the sem'd artifact; fall back to the declaration's raw source line.
+        let rendered = renderAt(s.config, uriToPath(locs[0].uri),
+                                locs[0].rng.start.line)
+        let dline = if rendered.len > 0: rendered
+                    else: strip(sourceLine(s, locs[0].uri, locs[0].rng.start.line))
         if dline.len > 0:
           let md = "```nim\n" & dline & "\n```"
           sendResult(idJson,
