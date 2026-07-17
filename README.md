@@ -16,8 +16,12 @@ end goal — JS-compilable for an in-browser IDE.
   `shutdown` / `exit`.
 - **Document sync** — `didOpen` / `didChange` (full sync) / `didSave` /
   `didClose`, with UTF-8 ↔ UTF-16 position mapping (LSP columns are UTF-16).
-- **Diagnostics** — from `nimony check`, published on open/change/save, grouped
-  by URI, with `Trace` lines attached as `relatedInformation`.
+- **Diagnostics** — semantic errors from `nimony check` (grouped by URI, `Trace`
+  lines as `relatedInformation`) **plus** recovering *syntax* diagnostics from
+  [aowlsuggest](https://github.com/aoughwl/aowlsuggest) over the **live buffer**:
+  where `nimony check` aborts at the first syntax error and only sees the saved
+  file, aowlsuggest recovers past every error and reads the unsaved buffer, so
+  you see all of them as you type.
 - **Go to definition**, **find references** (across open documents), and
   **hover** (shows the definition's source line) — via `nimony check
   --def/--usages` (idetools).

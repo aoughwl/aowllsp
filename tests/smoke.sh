@@ -30,6 +30,7 @@ msgs=[
  {"jsonrpc":"2.0","method":"initialized","params":{}},
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("bad.nim"),"languageId":"nim","version":1,"text":bad}}},
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("clean.nim"),"languageId":"nim","version":1,"text":clean}}},
+ {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("dirty.nim"),"languageId":"nim","version":1,"text":"if x = 5:\n  discard\nif y = 6:\n  discard\n"}}},
  {"jsonrpc":"2.0","id":2,"method":"textDocument/definition","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":2,"character":8}}},
  {"jsonrpc":"2.0","id":3,"method":"textDocument/hover","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":2,"character":8}}},
  {"jsonrpc":"2.0","id":4,"method":"textDocument/references","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":0,"character":5},"context":{"includeDeclaration":True}}},
@@ -61,6 +62,11 @@ check(caps.get("definitionProvider") and caps.get("hoverProvider"),"initialize c
 # a diagnostic was published for bad.nim
 diag_bad=[n for n in notifs if n["params"]["uri"]==uri("bad.nim") and n["params"]["diagnostics"]]
 check(diag_bad,"diagnostics for bad.nim")
+# recovering syntax diagnostics from aowlsuggest on the DIRTY buffer: BOTH errors
+syn=[d for n in notifs if n["params"]["uri"]==uri("dirty.nim")
+       for d in n["params"]["diagnostics"] if d.get("source")=="aowlsuggest"]
+synlines=sorted(set(d["range"]["start"]["line"] for d in syn))
+check(0 in synlines and 2 in synlines,"aowlsuggest recovers both syntax errors, got %s"%synlines)
 # definition resolves to the proc decl (line 0)
 d=resps.get(2) or []
 check(len(d)==1 and d[0]["range"]["start"]["line"]==0,"definition -> proc decl")

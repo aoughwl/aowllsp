@@ -12,7 +12,7 @@
 
 import std/[syncio, json, tables, strutils]
 import aowlkit/json as kjson
-import framing, protocol, uris, state, document, diagnostics, idetools
+import framing, protocol, uris, state, document, diagnostics, idetools, syntaxdiag
 
 const serverVersion = "0.1.0"
 
@@ -111,7 +111,13 @@ proc locationsJson(locs: seq[Location]): string =
 proc publishFor(s: ServerState; file: string) =
   ## Check `file` and publish diagnostics, grouped by URI. Files that produced no
   ## diagnostic this run still get an empty publish so stale markers clear.
-  let fds = computeDiagnostics(s.config, file)
+  var fds = computeDiagnostics(s.config, file)   # nimony check (semantic, disk)
+  # recovering SYNTAX diagnostics from aowlsuggest over the LIVE buffer.
+  let mainUriKey = pathToUri(file)
+  if s.docs.hasKey(mainUriKey):
+    let buf = s.docs.getOrDefault(mainUriKey).text
+    let syn = syntaxDiagnostics(s.config, file, buf)
+    for i in 0 ..< syn.len: fds.add syn[i]
   var byUri = initTable[string, string]()   # uri -> JSON array body
   var order: seq[string] = @[]
   # ensure the checked file always publishes (clears old markers)
