@@ -16,6 +16,13 @@ EOF
 cat > "$WORK/bad.nim" <<'EOF'
 let y: int = "oops"
 EOF
+cat > "$WORK/calls.nim" <<'EOF'
+proc leaf(x: int): int = x + 1
+
+proc mid(y: int): int = leaf(y) + leaf(y + 1)
+
+proc top(): int = mid(10)
+EOF
 cat > "$WORK/linky.nim" <<'EOF'
 import clean
 echo "linked"
@@ -37,6 +44,7 @@ msgs=[
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("dirty.nim"),"languageId":"nim","version":1,"text":"if x = 5:\n  discard\nif y = 6:\n  discard\n"}}},
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("linky.nim"),"languageId":"nim","version":1,"text":open(ROOT+"/linky.nim").read()}}},
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("messy.nim"),"languageId":"nim","version":1,"text":"let a = 1   \n\n\n\nlet b = 2"}}},
+ {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("calls.nim"),"languageId":"nim","version":1,"text":open(ROOT+"/calls.nim").read()}}},
  {"jsonrpc":"2.0","id":2,"method":"textDocument/definition","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":2,"character":8}}},
  {"jsonrpc":"2.0","id":3,"method":"textDocument/hover","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":2,"character":8}}},
  {"jsonrpc":"2.0","id":4,"method":"textDocument/references","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":0,"character":5},"context":{"includeDeclaration":True}}},
@@ -50,6 +58,10 @@ msgs=[
  {"jsonrpc":"2.0","id":13,"method":"textDocument/documentLink","params":{"textDocument":{"uri":uri("linky.nim")}}},
  {"jsonrpc":"2.0","id":14,"method":"textDocument/inlayHint","params":{"textDocument":{"uri":uri("clean.nim")},"range":{"start":{"line":0,"character":0},"end":{"line":10,"character":0}}}},
  {"jsonrpc":"2.0","id":15,"method":"textDocument/formatting","params":{"textDocument":{"uri":uri("messy.nim")},"options":{"tabSize":2,"insertSpaces":True}}},
+ {"jsonrpc":"2.0","id":16,"method":"textDocument/diagnostic","params":{"textDocument":{"uri":uri("bad.nim")}}},
+ {"jsonrpc":"2.0","id":17,"method":"textDocument/prepareCallHierarchy","params":{"textDocument":{"uri":uri("calls.nim")},"position":{"line":2,"character":5}}},
+ {"jsonrpc":"2.0","id":18,"method":"callHierarchy/incomingCalls","params":{"item":{"name":"mid","kind":12,"uri":uri("calls.nim"),"range":{"start":{"line":2,"character":5},"end":{"line":2,"character":8}},"selectionRange":{"start":{"line":2,"character":5},"end":{"line":2,"character":8}},"data":{"uri":uri("calls.nim"),"line":2,"character":5}}}},
+ {"jsonrpc":"2.0","id":19,"method":"callHierarchy/outgoingCalls","params":{"item":{"name":"mid","kind":12,"uri":uri("calls.nim"),"range":{"start":{"line":2,"character":5},"end":{"line":2,"character":8}},"selectionRange":{"start":{"line":2,"character":5},"end":{"line":2,"character":8}},"data":{"uri":uri("calls.nim"),"line":2,"character":5}}}},
  {"jsonrpc":"2.0","id":9,"method":"shutdown"},{"jsonrpc":"2.0","method":"exit"},
 ]
 p=subprocess.run([BIN],input=b"".join(frame(m) for m in msgs),capture_output=True,timeout=180)
@@ -133,9 +145,21 @@ fm=resps.get(15) or []
 check(isinstance(fm,list) and len(fm)==1 and
       fm[0]["newText"]=="let a = 1\n\nlet b = 2\n",
       "formatting returns normalized edit, got %s"%json.dumps(fm))
+# pull diagnostics: a full report with the type error for bad.nim
+pd=resps.get(16) or {}
+check(isinstance(pd,dict) and pd.get("kind")=="full" and len(pd.get("items",[]))>=1,
+      "pull diagnostic full report, got %s"%json.dumps(pd))
+# call hierarchy: prepare resolves mid; incoming = top; outgoing = leaf x2
+ph=resps.get(17) or []
+check(isinstance(ph,list) and ph and ph[0].get("name")=="mid","prepareCallHierarchy -> mid")
+ic=resps.get(18) or []
+check(any(c["from"]["name"]=="top" for c in ic),"incomingCalls: top calls mid, got %s"%json.dumps(ic))
+oc=resps.get(19) or []
+check(any(c["to"]["name"]=="leaf" and len(c["fromRanges"])==2 for c in oc),
+      "outgoingCalls: mid calls leaf x2, got %s"%json.dumps(oc))
 # capabilities advertise the new providers
 capset=set(k for k in (resps.get(1) or {}).get("capabilities",{}))
-for cap in ["documentSymbolProvider","completionProvider","semanticTokensProvider","renameProvider","codeActionProvider","signatureHelpProvider","codeLensProvider","documentLinkProvider","inlayHintProvider","documentFormattingProvider"]:
+for cap in ["documentSymbolProvider","completionProvider","semanticTokensProvider","renameProvider","codeActionProvider","signatureHelpProvider","codeLensProvider","documentLinkProvider","inlayHintProvider","documentFormattingProvider","diagnosticProvider","callHierarchyProvider"]:
     check(cap in capset, "capability %s advertised"%cap)
 
 print("smoke: PASS" if not fail else "smoke: FAILURES above")

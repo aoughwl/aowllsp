@@ -14,7 +14,7 @@ import std/[syncio, json, tables, strutils]
 import aowlkit/json as kjson
 import framing, protocol, uris, state, document, diagnostics, idetools, syntaxdiag
 import driver, symbols, completion, codeactions, semtokens, structure, renamehl
-import hints, typeinfo, formatting
+import hints, typeinfo, formatting, callhier
 
 const serverVersion = "0.1.0"
 
@@ -139,6 +139,22 @@ proc parseLensData(root: JsonNode; uri: var string; line, character: var int) =
             of "character": character = int(v3.getInt)
             else: discard
 
+proc parseCallItemData(root: JsonNode; uri: var string; line, character: var int) =
+  ## callHierarchy/incomingCalls|outgoingCalls: params.item.data holds the
+  ## {uri,line,character} we stashed in the CallHierarchyItem.
+  for k, v in pairs(root):
+    if k == "params":
+      for k2, v2 in pairs(v):
+        if k2 == "item":
+          for k3, v3 in pairs(v2):
+            if k3 == "data":
+              for k4, v4 in pairs(v3):
+                case k4
+                of "uri": uri = v4.getStr
+                of "line": line = int(v4.getInt)
+                of "character": character = int(v4.getInt)
+                else: discard
+
 proc parseQuery(root: JsonNode; query: var string) =
   for k, v in pairs(root):
     if k == "params":
@@ -222,6 +238,26 @@ proc publishFor(s: ServerState; file: string) =
       "{\"uri\":" & kjson.jStr(uri) & ",\"diagnostics\":[" &
       byUri.getOrDefault(uri, "") & "]}")
 
+proc documentDiagnosticReport(s: ServerState; file: string): string =
+  ## LSP 3.17 pull-model: a full DocumentDiagnosticReport for `file` — the same
+  ## semantic + recovering-syntax diagnostics publishFor pushes, but returned on
+  ## request and scoped to this document.
+  var fds: seq[FileDiag]
+  let mainUriKey = pathToUri(file)
+  if s.docs.hasKey(mainUriKey):
+    let buf = s.docs.getOrDefault(mainUriKey).text
+    fds = computeDiagnosticsLive(s.config, file, buf)
+    let syn = syntaxDiagnostics(s.config, file, buf)
+    for i in 0 ..< syn.len: fds.add syn[i]
+  else:
+    fds = computeDiagnostics(s.config, file)
+  var items = ""
+  for i in 0 ..< fds.len:
+    if pathToUri(fds[i].file) != mainUriKey: continue   # this document only
+    if items.len > 0: items.add ","
+    items.add diagnosticJson(fds[i].diag)
+  result = "{\"kind\":\"full\",\"items\":[" & items & "]}"
+
 proc openDocuments(s: ServerState): seq[string] =
   result = @[]
   for uri, doc in pairs(s.docs):
@@ -298,6 +334,8 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
       "\"documentLinkProvider\":{\"resolveProvider\":false}," &
       "\"inlayHintProvider\":true," &
       "\"documentFormattingProvider\":true," &
+      "\"diagnosticProvider\":{\"interFileDependencies\":true,\"workspaceDiagnostics\":false}," &
+      "\"callHierarchyProvider\":true," &
       "\"codeActionProvider\":true," &
       "\"renameProvider\":{\"prepareProvider\":true}," &
       "\"foldingRangeProvider\":true," &
@@ -514,6 +552,41 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     parseUriOnly(tree.root, uri)
     if hasId:
       sendResult(idJson, formattingEdits(s.config, docText(s, uri)))
+  of "textDocument/diagnostic":
+    var uri = ""
+    parseUriOnly(tree.root, uri)
+    if hasId:
+      sendResult(idJson, documentDiagnosticReport(s, uriToPath(uri)))
+  of "textDocument/prepareCallHierarchy":
+    var uri = ""
+    var line = 0
+    var ch = 0
+    parseDocPos(tree.root, uri, line, ch)
+    if hasId:
+      sendResult(idJson, prepareCallHierarchy(s.config, uriToPath(uri),
+        pos(line, ch), docText(s, uri)))
+  of "callHierarchy/incomingCalls":
+    var uri = ""
+    var line = 0
+    var ch = 0
+    parseCallItemData(tree.root, uri, line, ch)
+    if hasId:
+      if uri.len > 0:
+        sendResult(idJson, incomingCallsJson(s.config, uri, line, ch,
+          openDocuments(s), docText(s, uri)))
+      else:
+        sendResult(idJson, "[]")
+  of "callHierarchy/outgoingCalls":
+    var uri = ""
+    var line = 0
+    var ch = 0
+    parseCallItemData(tree.root, uri, line, ch)
+    if hasId:
+      if uri.len > 0:
+        sendResult(idJson, outgoingCallsJson(s.config, uri, line, ch,
+          docText(s, uri)))
+      else:
+        sendResult(idJson, "[]")
   else:
     if hasId:
       sendResult(idJson, "null")

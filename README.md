@@ -4,7 +4,7 @@ A **Language Server for Nimony, written in Nimony.** A ground-up nimony rewrite
 of the (Nim 2) `nimony-lsp`, so the whole editor stack is self-owned and — the
 end goal — JS-compilable for an in-browser IDE.
 
-> Status: **broad feature coverage.** ~28 LSP methods handled. Navigation and
+> Status: **broad feature coverage.** ~32 LSP methods handled. Navigation and
 > diagnostics run via the `nimony` subprocess; the symbol/token features read NIF
 > artifacts through the nimony-native [aowllens](https://github.com/aoughwl/aowllens).
 > A future browser build swaps both for in-process calls (see the seam below).
@@ -45,6 +45,11 @@ end goal — JS-compilable for an in-browser IDE.
   [aowlfmt](https://github.com/aoughwl/aowlfmt), which proves each reformat
   preserves program structure before returning it (so the edit can't corrupt
   the buffer).
+- **pull diagnostics** (`textDocument/diagnostic`) — the LSP 3.17 pull model:
+  the same semantic + recovering-syntax diagnostics, returned on request.
+- **call hierarchy** — `prepareCallHierarchy` + **incomingCalls** (who calls
+  this) and **outgoingCalls** (what this calls), read from the sem'd artifact's
+  call edges via [aowllens](https://github.com/aoughwl/aowllens) `calls`.
 - **foldingRange** and **selectionRange** — indentation/word heuristics.
 - **cache pruning** — the per-module nimcache pool is bounded (LRU eviction on
   `didClose`), so it can't grow without limit.
