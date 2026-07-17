@@ -4,7 +4,7 @@ A **Language Server for Nimony, written in Nimony.** A ground-up nimony rewrite
 of the (Nim 2) `nimony-lsp`, so the whole editor stack is self-owned and — the
 end goal — JS-compilable for an in-browser IDE.
 
-> Status: **broad feature coverage.** ~23 LSP methods handled. Navigation and
+> Status: **broad feature coverage.** ~26 LSP methods handled. Navigation and
 > diagnostics run via the `nimony` subprocess; the symbol/token features read NIF
 > artifacts through the nimony-native [aowllens](https://github.com/aoughwl/aowllens).
 > A future browser build swaps both for in-process calls (see the seam below).
@@ -32,6 +32,12 @@ end goal — JS-compilable for an in-browser IDE.
   fixes with "did you mean" alternatives).
 - **semanticTokens/full** — declaration-site highlighting from `aowllens decls`.
 - **rename** / **prepareRename** — WorkspaceEdit across every reference.
+- **signatureHelp** — the callee's declaration line with its parameters split
+  out and the active one selected (reuses goto-definition; no new type info).
+- **codeLens** — a "N references" lens over every top-level routine/type; the
+  count is computed lazily in **codeLens/resolve**, so opening a file is cheap.
+- **documentLink** — `import` / `include` / `from` module names linked to the
+  file they resolve to on disk.
 - **foldingRange** and **selectionRange** — indentation/word heuristics.
 - **cache pruning** — the per-module nimcache pool is bounded (LRU eviction on
   `didClose`), so it can't grow without limit.

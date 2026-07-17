@@ -14,6 +14,7 @@ import std/[syncio, json, tables, strutils]
 import aowlkit/json as kjson
 import framing, protocol, uris, state, document, diagnostics, idetools, syntaxdiag
 import driver, symbols, completion, codeactions, semtokens, structure, renamehl
+import hints
 
 const serverVersion = "0.1.0"
 
@@ -123,6 +124,20 @@ proc parseRename(root: JsonNode; uri: var string; line, character: var int;
             else: discard
         of "newName": newName = v2.getStr
         else: discard
+
+proc parseLensData(root: JsonNode; uri: var string; line, character: var int) =
+  ## codeLens/resolve: params is a CodeLens whose `data` field holds the
+  ## {uri,line,character} we stashed when producing the lens.
+  for k, v in pairs(root):
+    if k == "params":
+      for k2, v2 in pairs(v):
+        if k2 == "data":
+          for k3, v3 in pairs(v2):
+            case k3
+            of "uri": uri = v3.getStr
+            of "line": line = int(v3.getInt)
+            of "character": character = int(v3.getInt)
+            else: discard
 
 proc parseQuery(root: JsonNode; query: var string) =
   for k, v in pairs(root):
@@ -278,6 +293,9 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
       "\"documentSymbolProvider\":true," &
       "\"workspaceSymbolProvider\":true," &
       "\"completionProvider\":{\"triggerCharacters\":[\".\",\"(\"]}," &
+      "\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]}," &
+      "\"codeLensProvider\":{\"resolveProvider\":true}," &
+      "\"documentLinkProvider\":{\"resolveProvider\":false}," &
       "\"codeActionProvider\":true," &
       "\"renameProvider\":{\"prepareProvider\":true}," &
       "\"foldingRangeProvider\":true," &
@@ -445,6 +463,37 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
           pos(line, ch), wlen, newName, openDocuments(s), docText(s, uri)))
       else:
         sendResult(idJson, "null")
+  of "textDocument/signatureHelp":
+    var uri = ""
+    var line = 0
+    var ch = 0
+    parseDocPos(tree.root, uri, line, ch)
+    if hasId:
+      sendResult(idJson, signatureHelpJson(s.config, uriToPath(uri),
+        line, ch, docText(s, uri)))
+  of "textDocument/codeLens":
+    var uri = ""
+    parseUriOnly(tree.root, uri)
+    if hasId:
+      sendResult(idJson, codeLensesJson(s.config, uriToPath(uri), uri))
+  of "codeLens/resolve":
+    # params IS a CodeLens; its `data` carries {uri,line,character}.
+    var uri = ""
+    var line = 0
+    var ch = 0
+    parseLensData(tree.root, uri, line, ch)
+    if hasId:
+      if uri.len > 0:
+        sendResult(idJson, resolveCodeLensJson(s.config, uri, line, ch,
+          openDocuments(s), docText(s, uri)))
+      else:
+        sendResult(idJson, "null")
+  of "textDocument/documentLink":
+    var uri = ""
+    parseUriOnly(tree.root, uri)
+    if hasId:
+      sendResult(idJson, documentLinksJson(s.config, uriToPath(uri),
+        docText(s, uri)))
   else:
     if hasId:
       sendResult(idJson, "null")

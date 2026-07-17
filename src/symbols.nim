@@ -101,6 +101,28 @@ proc lineRange(line, col: int): Range =
   let l = if line > 0: line - 1 else: 0
   mkRange(l, col, l, col)
 
+# --- decl positions for a file (consumed by codeLens) -----------------------
+
+type SymPos* = object
+  name*: string
+  kind*: string
+  line*: int   ## 0-based
+  col*: int    ## 0-based
+
+proc fileDecls*(cfg: Config; file: string): seq[SymPos] =
+  ## The declarations whose source is `file`, as 0-based positions. Used to
+  ## anchor code lenses on each top-level routine/type.
+  result = @[]
+  let snif = mainArtifact(cfg, file, ".s.nif")
+  let recs = runDecls(cfg, snif)
+  let want = baseName(file)
+  for i in 0 ..< recs.len:
+    let r = recs[i]
+    if not r.sawLine or r.name.len == 0: continue
+    if baseName(r.file) != want: continue
+    let l = if r.line > 0: r.line - 1 else: 0
+    result.add SymPos(name: r.name, kind: r.kind, line: l, col: r.col)
+
 # --- documentSymbol ---------------------------------------------------------
 
 proc documentSymbols*(cfg: Config; file: string): string =
