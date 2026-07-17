@@ -44,6 +44,20 @@ proc applyInitOptions(v2: JsonNode; cfg: var Config) =
       var xs: seq[string] = @[]
       for el in items(v3): xs.add el.getStr
       cfg.extraPaths = xs
+    of "pedantic":
+      # `"pedantic": true` → enable aowlsuggest's safe style set live in the editor
+      if v3.kind == JBool and v3.getBool:
+        var found = false
+        for f in cfg.styleFlags:
+          if f == "--pedantic": found = true
+        if not found: cfg.styleFlags.add "--pedantic"
+    of "style":
+      # `"style": ["trailing-whitespace","lf",...]` → per-category opt-in
+      var xs: seq[string] = @[]
+      for el in items(v3):
+        let cat = el.getStr
+        if cat.len > 0: xs.add "--style:" & cat
+      cfg.styleFlags = xs
     else: discard
 
 proc parseInitialize(root: JsonNode; rootUri: var string; cfg: var Config) =
@@ -122,6 +136,17 @@ proc parseCodeActionRange(root: JsonNode; uri: var string; loLine, hiLine: var i
             elif k3 == "end":
               for k4, v4 in pairs(v3):
                 if k4 == "line": hiLine = int(v4.getInt)
+
+proc parseCodeActionOnly(root: JsonNode; only: var seq[string]) =
+  ## Extract `params.context.only` (the CodeActionKind filter) so the server can
+  ## skip work the client didn't ask for (e.g. quickfix-only vs source.fixAll).
+  for k, v in pairs(root):
+    if k == "params":
+      for k2, v2 in pairs(v):
+        if k2 == "context":
+          for k3, v3 in pairs(v2):
+            if k3 == "only":
+              for el in items(v3): only.add el.getStr
 
 proc parseRename(root: JsonNode; uri: var string; line, character: var int;
                  newName: var string) =
@@ -354,7 +379,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
       "\"callHierarchyProvider\":true," &
       "\"typeHierarchyProvider\":true," &
       "\"documentRangeFormattingProvider\":true," &
-      "\"codeActionProvider\":true," &
+      "\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\",\"source.fixAll\"]}," &
       "\"renameProvider\":{\"prepareProvider\":true}," &
       "\"foldingRangeProvider\":true," &
       "\"selectionRangeProvider\":true," &
@@ -482,10 +507,38 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var uri = ""
     var loLine = 0
     var hiLine = 1000000000
+    var only: seq[string] = @[]
     parseCodeActionRange(tree.root, uri, loLine, hiLine)
+    parseCodeActionOnly(tree.root, only)
     if hasId:
-      sendResult(idJson, codeActionsFor(s.config, uriToPath(uri),
-        docText(s, uri), loLine, hiLine))
+      let buf = docText(s, uri)
+      # quickfix actions (range-scoped) unless the client asked ONLY for source.*
+      var wantQuickfix = only.len == 0
+      var wantFixAll = only.len == 0
+      for kind in only:
+        if kind == "quickfix" or kind == "": wantQuickfix = true
+        if kind == "source" or startsWith(kind, "source."): wantFixAll = true
+      var arr = if wantQuickfix:
+          codeActionsFor(s.config, uriToPath(uri), buf, loLine, hiLine)
+        else: "[]"
+      # append a single whole-document source.fixAll action when applicable
+      if wantFixAll:
+        var endLine = 1000000000
+        var endChar = 0
+        if s.docs.hasKey(uri):
+          let d = s.docs.getOrDefault(uri)
+          let endPos = positionAt(d, d.text.len)
+          endLine = endPos.line
+          endChar = endPos.character
+        let fa = fixAllAction(s.config, uri, uriToPath(uri), buf, endLine, endChar)
+        if fa.len > 0:
+          if arr.len >= 2 and arr[arr.len - 1] == ']':
+            let inner = substr(arr, 1, arr.len - 2)
+            arr = if inner.len > 0: "[" & inner & "," & fa & "]"
+                  else: "[" & fa & "]"
+          else:
+            arr = "[" & fa & "]"
+      sendResult(idJson, arr)
   of "textDocument/semanticTokens/full":
     var uri = ""
     parseUriOnly(tree.root, uri)

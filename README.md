@@ -29,7 +29,11 @@ end goal — JS-compilable for an in-browser IDE.
 - **completion** — module symbols filtered by the identifier prefix under the
   cursor (via `aowllens decls`/`index`).
 - **codeAction** — quick-fixes delegated to `aowlsuggest` (its recovering-syntax
-  fixes with "did you mean" alternatives).
+  fixes with "did you mean" alternatives), **plus a `source.fixAll` action** that
+  applies *every* verified auto-fix in the buffer at once (syntax repairs and any
+  opt-in style fixes) as a single whole-document edit — ideal for
+  `editor.codeActionsOnSave`. The server honours the request's `context.only`, so
+  a quickfix-only request skips the fix-all pass.
 - **semanticTokens/full** — declaration-site highlighting from `aowllens decls`.
 - **rename** / **prepareRename** — WorkspaceEdit across every reference.
 - **signatureHelp** — the callee's declaration line with its parameters split
@@ -56,7 +60,11 @@ end goal — JS-compilable for an in-browser IDE.
   selected lines, delegated to `aowlfmt --range` (still gate-verified).
 - **initializationOptions** — the editor can override the tool paths
   (`nimonyExe` / `aowlsuggestExe` / `aowllensExe` / `aowlfmtExe`) and
-  `extraPaths` per workspace; anything omitted keeps its env/default.
+  `extraPaths` per workspace; anything omitted keeps its env/default. Opt in to
+  aowlsuggest's stylistic lint with `"pedantic": true` (trailing-whitespace +
+  final-newline + BOM) or `"style": ["trailing-whitespace", "lf", …]` — the
+  matching diagnostics then appear live and feed both the quick-fix and
+  `source.fixAll` actions.
 - **foldingRange** and **selectionRange** — indentation/word heuristics.
 - **cache pruning** — the per-module nimcache pool is bounded (LRU eviction on
   `didClose`), so it can't grow without limit.

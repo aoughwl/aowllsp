@@ -11,6 +11,8 @@ type
     aowlfmtExe*: string       ## path to `aowlfmt` (verified formatter); "" = off
     extraPaths*: seq[string]   ## extra --path entries
     projectRoot*: string       ## workspace root (filesystem path)
+    styleFlags*: seq[string]   ## opt-in aowlsuggest style args (`--pedantic`,
+                               ## `--style:CAT`); empty = default lint only
 
   ServerState* = object
     config*: Config
@@ -32,7 +34,8 @@ proc defaultConfig*(): Config =
     aowllensExe: getEnvOr("AOWLLENS", "/home/savant/aowllens/bin/aowllens"),
     aowlfmtExe: getEnvOr("AOWLFMT", "/home/savant/aowlfmt/bin/aowlfmt"),
     extraPaths: @[],
-    projectRoot: "")
+    projectRoot: "",
+    styleFlags: @[])
 
 proc newServerState*(): ServerState =
   ServerState(config: defaultConfig(), docs: initTable[string, Document](),

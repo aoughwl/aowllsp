@@ -46,7 +46,7 @@ def frame(o):
 clean = open(ROOT+"/clean.nim").read()
 bad   = open(ROOT+"/bad.nim").read()
 msgs=[
- {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"file://"+ROOT,"capabilities":{},"initializationOptions":{"extraPaths":["/tmp/x"]}}},
+ {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"file://"+ROOT,"capabilities":{},"initializationOptions":{"extraPaths":["/tmp/x"],"pedantic":True}}},
  {"jsonrpc":"2.0","method":"initialized","params":{}},
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("bad.nim"),"languageId":"nim","version":1,"text":bad}}},
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("clean.nim"),"languageId":"nim","version":1,"text":clean}}},
@@ -76,6 +76,9 @@ msgs=[
  {"jsonrpc":"2.0","id":21,"method":"textDocument/prepareTypeHierarchy","params":{"textDocument":{"uri":uri("th.nim")},"position":{"line":3,"character":2}}},
  {"jsonrpc":"2.0","id":22,"method":"typeHierarchy/supertypes","params":{"item":{"name":"Dog","kind":5,"uri":uri("th.nim"),"range":{"start":{"line":3,"character":2},"end":{"line":3,"character":5}},"selectionRange":{"start":{"line":3,"character":2},"end":{"line":3,"character":5}},"data":{"uri":uri("th.nim"),"line":3,"character":2}}}},
  {"jsonrpc":"2.0","id":23,"method":"typeHierarchy/subtypes","params":{"item":{"name":"Animal","kind":5,"uri":uri("th.nim"),"range":{"start":{"line":1,"character":2},"end":{"line":1,"character":8}},"selectionRange":{"start":{"line":1,"character":2},"end":{"line":1,"character":8}},"data":{"uri":uri("th.nim"),"line":1,"character":2}}}},
+ {"jsonrpc":"2.0","id":24,"method":"textDocument/codeAction","params":{"textDocument":{"uri":uri("dirty.nim")},"range":{"start":{"line":0,"character":0},"end":{"line":3,"character":0}},"context":{"diagnostics":[],"only":["source.fixAll"]}}},
+ {"jsonrpc":"2.0","id":25,"method":"textDocument/codeAction","params":{"textDocument":{"uri":uri("dirty.nim")},"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":9}},"context":{"diagnostics":[],"only":["quickfix"]}}},
+ {"jsonrpc":"2.0","id":26,"method":"textDocument/codeAction","params":{"textDocument":{"uri":uri("messy.nim")},"range":{"start":{"line":0,"character":0},"end":{"line":4,"character":0}},"context":{"diagnostics":[],"only":["source.fixAll"]}}},
  {"jsonrpc":"2.0","id":9,"method":"shutdown"},{"jsonrpc":"2.0","method":"exit"},
 ]
 p=subprocess.run([BIN],input=b"".join(frame(m) for m in msgs),capture_output=True,timeout=180)
@@ -183,6 +186,41 @@ sup=resps.get(22) or []
 check(any(t["name"]=="Animal" for t in sup),"supertypes(Dog)=Animal, got %s"%json.dumps(sup))
 sub=resps.get(23) or []
 check(set(t["name"] for t in sub)=={"Dog","Cat"},"subtypes(Animal)=Dog+Cat, got %s"%json.dumps(sub))
+# style integration (initializationOptions.pedantic=true): messy.nim's trailing
+# whitespace surfaces as an aowlsuggest diagnostic live in the editor
+mstyle=[d for n in notifs if n["params"]["uri"]==uri("messy.nim")
+          for d in n["params"]["diagnostics"]
+          if d.get("source")=="aowlsuggest" and "trailing-whitespace" in d.get("message","")]
+check(mstyle,"pedantic surfaces trailing-whitespace on messy.nim, got %s"%
+      json.dumps([n["params"]["diagnostics"] for n in notifs if n["params"]["uri"]==uri("messy.nim")]))
+# source.fixAll on dirty.nim: one action, kind source.fixAll, whose whole-doc edit
+# has the verified repair applied (= -> ==) keyed under the document URI
+fa=resps.get(24) or []
+faOk=(isinstance(fa,list) and len(fa)==1 and fa[0].get("kind")=="source.fixAll")
+newText=""
+if faOk:
+    ch=(fa[0].get("edit",{}) or {}).get("changes",{})
+    edits=ch.get(uri("dirty.nim"),[])
+    if edits: newText=edits[0].get("newText","")
+check(faOk and "if x == 5" in newText and "if y == 6" in newText,
+      "source.fixAll applies verified repairs, got %s"%json.dumps(fa))
+# a quickfix-only request must NOT include the source.fixAll action
+qf=resps.get(25) or []
+check(isinstance(qf,list) and not any(a.get("kind")=="source.fixAll" for a in qf),
+      "quickfix-only request excludes source.fixAll, got %s"%json.dumps(qf))
+# source.fixAll on messy.nim applies STYLE fixes: trailing ws gone + final newline
+fam=resps.get(26) or []
+mtext=""
+if isinstance(fam,list) and fam and fam[0].get("kind")=="source.fixAll":
+    ch=(fam[0].get("edit",{}) or {}).get("changes",{})
+    edits=ch.get(uri("messy.nim"),[])
+    if edits: mtext=edits[0].get("newText","")
+check(mtext and "let a = 1\n" in mtext and mtext.endswith("\n") and "   \n" not in mtext,
+      "source.fixAll applies style fixes on messy.nim, got %r"%mtext)
+# codeAction advertises source.fixAll among its kinds
+cap_ca=(resps.get(1) or {}).get("capabilities",{}).get("codeActionProvider",{})
+kinds=cap_ca.get("codeActionKinds",[]) if isinstance(cap_ca,dict) else []
+check("source.fixAll" in kinds,"codeActionProvider advertises source.fixAll, got %s"%json.dumps(cap_ca))
 # capabilities advertise the new providers
 capset=set(k for k in (resps.get(1) or {}).get("capabilities",{}))
 for cap in ["documentSymbolProvider","completionProvider","semanticTokensProvider","renameProvider","codeActionProvider","signatureHelpProvider","codeLensProvider","documentLinkProvider","inlayHintProvider","documentFormattingProvider","documentRangeFormattingProvider","diagnosticProvider","callHierarchyProvider","typeHierarchyProvider"]:

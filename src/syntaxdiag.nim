@@ -48,7 +48,8 @@ proc syntaxDiagnostics*(cfg: Config; file, bufferText: string): seq[FileDiag] =
   ## buffer and decode its diagnostics. Empty when aowlsuggest is unavailable.
   result = @[]
   if cfg.aowlsuggestExe.len == 0: return
-  let args = @["check", "--stdin", "--filename:" & file, "--format:json"]
+  var args = @["check", "--stdin", "--filename:" & file, "--format:json"]
+  for f in cfg.styleFlags: args.add f   # opt-in style diagnostics, live
   let cap = runWithInput(cfg.aowlsuggestExe, args, bufferText)
   if not cap.ok or cap.output.len == 0: return
   var tree = default(JsonTree)

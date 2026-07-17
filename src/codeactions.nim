@@ -11,6 +11,7 @@ import std/syncio
 import std/strutils
 import state
 import aowlkit/subprocess
+import aowlkit/json as kjson
 
 proc matchingBracket(s: string; openIdx: int): int =
   ## Given `s[openIdx]` is an opening bracket (`[` or `{`), return the index of
@@ -76,7 +77,8 @@ proc codeActionsFor*(cfg: Config; file, bufferText: string; loLine, hiLine: int)
   ## diagnostics whose line (0-based) falls in [loLine, hiLine]. Empty "[]" if none.
   if cfg.aowlsuggestExe.len == 0:
     return "[]"
-  let args = @["lsp", "--stdin", "--filename:" & file]
+  var args = @["lsp", "--stdin", "--filename:" & file]
+  for f in cfg.styleFlags: args.add f   # surface style quick-fixes too
   let cap = runWithInput(cfg.aowlsuggestExe, args, bufferText, "")
   if not cap.ok:
     return "[]"
@@ -117,3 +119,26 @@ proc codeActionsFor*(cfg: Config; file, bufferText: string; loLine, hiLine: int)
     first = false
   res.add "]"
   return res
+
+proc fixAllAction*(cfg: Config; uri, file, bufferText: string;
+                   endLine, endChar: int): string =
+  ## A single `source.fixAll` CodeAction that applies EVERY verified auto-fix
+  ## (syntax repairs plus any opt-in style fixes) in one shot, as a
+  ## whole-document WorkspaceEdit. Delegates to `aowlsuggest fix --stdin`, whose
+  ## verify loop guarantees the result never has more problems than the input, so
+  ## a fix-all can't corrupt the buffer. Returns "" when aowlsuggest is off or the
+  ## fix would change nothing (so no empty action clutters the menu).
+  if cfg.aowlsuggestExe.len == 0: return ""
+  var args = @["fix", "--stdin", "--filename:" & file]
+  for f in cfg.styleFlags: args.add f
+  let cap = runWithInput(cfg.aowlsuggestExe, args, bufferText, "")
+  # `fix --stdin` writes the (possibly unchanged) fixed source to stdout; stderr
+  # (the summary) is discarded by runWithInput. No change → no action.
+  if not cap.ok or cap.output.len == 0 or cap.output == bufferText:
+    return ""
+  let rng = "{\"start\":{\"line\":0,\"character\":0}," &
+    "\"end\":{\"line\":" & $endLine & ",\"character\":" & $endChar & "}}"
+  let edit = "{\"range\":" & rng & ",\"newText\":" & kjson.jStr(cap.output) & "}"
+  result = "{\"title\":\"Fix all auto-fixable problems (aowlsuggest)\"," &
+    "\"kind\":\"source.fixAll\",\"isPreferred\":true," &
+    "\"edit\":{\"changes\":{" & kjson.jStr(uri) & ":[" & edit & "]}}}"
