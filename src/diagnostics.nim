@@ -92,3 +92,8 @@ proc computeDiagnostics*(cfg: Config; file: string): seq[FileDiag] =
   ## Run the checker on `file` (absolute path) and parse its diagnostics.
   let r = run(cfg, "check", file)
   result = parseDiagnostics(cfg, r.output)
+
+proc computeDiagnosticsLive*(cfg: Config; file, bufferText: string): seq[FileDiag] =
+  ## Semantic diagnostics for the UNSAVED buffer (reflects in-flight edits).
+  let r = runLiveCheck(cfg, file, bufferText)
+  result = parseDiagnostics(cfg, r.output)

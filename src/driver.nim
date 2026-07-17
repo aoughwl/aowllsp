@@ -9,7 +9,7 @@
 ## This is the seam a future browser build swaps for in-process aowlparser/
 ## aowlsem calls — the drivers above it only see `run`.
 
-import std/[strutils, os, dirs, paths]
+import std/[strutils, os, dirs, paths, syncio]
 import aowlkit/subprocess
 import state
 
@@ -136,3 +136,40 @@ proc run*(cfg: Config; sub, file: string; track: seq[string] = @[]): CaptureResu
     if cfg.projectRoot.len > 0: cfg.projectRoot
     else: parentDirOf(file)
   result = runCaptured(cfg.nimonyExe, args, workdir, true)
+
+proc runLiveCheck*(cfg: Config; file, bufferText: string;
+                   track: seq[string] = @[]): CaptureResult =
+  ## Check the UNSAVED buffer, not the on-disk file: write `bufferText` to a
+  ## sibling temp file (same directory, so relative imports resolve), check it
+  ## into an ISOLATED live nimcache, then map the temp path back to the real
+  ## file in the output so diagnostics/records point at the user's file. This is
+  ## what makes semantic diagnostics and navigation reflect in-flight edits.
+  if cfg.nimonyExe.len == 0:
+    return CaptureResult(output: "", exitCode: 127, ok: false)
+  let dir = parentDirOf(file)
+  let cf = canonFile(cfg, file)
+  # NB: no leading dot — nimony derives the module name from the filename and a
+  # dot-prefixed name yields an empty module name (nifreader assertion crash).
+  let tempAbs = dir & "/aowllsp_live_" & mangle(cf) & ".nim"
+  var wrote = false
+  try:
+    writeFile(tempAbs, bufferText); wrote = true
+  except:
+    # can't write next to the file — fall back to the on-disk check
+    return run(cfg, "check", file, track)
+  let tempRel = canonFile(cfg, tempAbs)
+  var args: seq[string] = @["check", "--nimcache:" & moduleCacheDir(cfg, cf) & "-live"]
+  for i in 0 ..< cfg.extraPaths.len:
+    args.add "--path:" & cfg.extraPaths[i]
+  # a --def/--usages track names the file by `cf`; the compiled module is the
+  # temp, so rewrite the track's file reference real->temp.
+  for i in 0 ..< track.len:
+    args.add replace(track[i], cf, tempRel)
+  args.add tempRel
+  let workdir = if cfg.projectRoot.len > 0: cfg.projectRoot else: dir
+  result = runCaptured(cfg.nimonyExe, args, workdir, true)
+  # map the temp path back to the real file (tempRel is unique in the output)
+  result.output = replace(result.output, tempRel, cf)
+  if wrote:
+    try: removeFile(path(tempAbs))
+    except: discard

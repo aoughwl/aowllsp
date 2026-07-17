@@ -61,22 +61,25 @@ proc collect(cfg: Config; output, want: string; seen: var seq[string];
       seen.add k
       acc.add loc
 
-proc definition*(cfg: Config; file: string; p: Position): seq[Location] =
+proc definition*(cfg: Config; file: string; p: Position;
+                 bufferText = ""): seq[Location] =
   let cf = canonFile(cfg, file)
   let track = "--def:" & cf & "," & $(p.line + 1) & "," & $(p.character + 1)
-  let r = run(cfg, "check", file, @[track])
+  let r = if bufferText.len > 0: runLiveCheck(cfg, file, bufferText, @[track])
+          else: run(cfg, "check", file, @[track])
   result = @[]
   var seen: seq[string] = @[]
   collect(cfg, r.output, "", seen, result)
 
 proc references*(cfg: Config; file: string; p: Position;
-                 extraRoots: seq[string] = @[]): seq[Location] =
+                 extraRoots: seq[string] = @[]; bufferText = ""): seq[Location] =
   let cf = canonFile(cfg, file)
   result = @[]
   var seen: seq[string] = @[]
-  # usages inside the target module
+  # usages inside the target module (LIVE when a buffer is supplied)
   let ut = "--usages:" & cf & "," & $(p.line + 1) & "," & $(p.character + 1)
-  let r0 = run(cfg, "check", file, @[ut])
+  let r0 = if bufferText.len > 0: runLiveCheck(cfg, file, bufferText, @[ut])
+           else: run(cfg, "check", file, @[ut])
   collect(cfg, r0.output, "use", seen, result)
   # cross-file usages: run the same query rooted at each other open document
   for i in 0 ..< extraRoots.len:
@@ -84,7 +87,8 @@ proc references*(cfg: Config; file: string; p: Position;
     if canonFile(cfg, e) == cf: continue
     let r1 = run(cfg, "check", e, @[ut])
     collect(cfg, r1.output, "use", seen, result)
-  # declaration site
+  # declaration site (LIVE when a buffer is supplied)
   let dt = "--def:" & cf & "," & $(p.line + 1) & "," & $(p.character + 1)
-  let r2 = run(cfg, "check", file, @[dt])
+  let r2 = if bufferText.len > 0: runLiveCheck(cfg, file, bufferText, @[dt])
+           else: run(cfg, "check", file, @[dt])
   collect(cfg, r2.output, "def", seen, result)

@@ -15,14 +15,16 @@ end goal — JS-compilable for an in-browser IDE.
   `shutdown` / `exit`.
 - **Document sync** — `didOpen` / `didChange` (full sync) / `didSave` /
   `didClose`, with UTF-8 ↔ UTF-16 position mapping (LSP columns are UTF-16).
-- **Diagnostics** — semantic errors from `nimony check` (grouped by URI, `Trace`
-  lines as `relatedInformation`) **plus** recovering *syntax* diagnostics from
-  [aowlsuggest](https://github.com/aoughwl/aowlsuggest) over the **live buffer**:
-  where `nimony check` aborts at the first syntax error and only sees the saved
-  file, aowlsuggest recovers past every error and reads the unsaved buffer.
+- **Diagnostics** — semantic errors from `nimony check` **over the live,
+  unsaved buffer** (materialized to a sibling temp file, checked, paths mapped
+  back), grouped by URI, `Trace` lines as `relatedInformation`, **plus**
+  recovering *syntax* diagnostics from
+  [aowlsuggest](https://github.com/aoughwl/aowlsuggest) over the same buffer —
+  so both semantic and syntax errors reflect what you're typing.
 - **Navigation** — go to **definition**, **declaration**, **typeDefinition**,
   **implementation**, find **references**, **documentHighlight**, and **hover**,
-  via `nimony check --def/--usages` (idetools).
+  via `nimony check --def/--usages` (idetools), also run **over the live
+  buffer** so a symbol you just typed resolves before you save.
 - **Symbols** — **documentSymbol** and **workspaceSymbol**, from `aowllens decls`.
 - **completion** — module symbols filtered by the identifier prefix under the
   cursor (via `aowllens decls`/`index`).

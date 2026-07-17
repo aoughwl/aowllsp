@@ -171,13 +171,21 @@ proc locationsJson(locs: seq[Location]): string =
 proc publishFor(s: ServerState; file: string) =
   ## Check `file` and publish diagnostics, grouped by URI. Files that produced no
   ## diagnostic this run still get an empty publish so stale markers clear.
-  var fds = computeDiagnostics(s.config, file)   # nimony check (semantic, disk)
-  # recovering SYNTAX diagnostics from aowlsuggest over the LIVE buffer.
+  # Semantic diagnostics: over the LIVE buffer when the doc is open (so unsaved
+  # edits are reflected), else the on-disk file.
   let mainUriKey = pathToUri(file)
+  var fds: seq[FileDiag]
   if s.docs.hasKey(mainUriKey):
     let buf = s.docs.getOrDefault(mainUriKey).text
+    fds = computeDiagnosticsLive(s.config, file, buf)
+    # recovering SYNTAX diagnostics from aowlsuggest over the same buffer
     let syn = syntaxDiagnostics(s.config, file, buf)
     for i in 0 ..< syn.len: fds.add syn[i]
+    # ALSO refresh the on-disk artifact (.s.nif) so the symbol/token/completion
+    # features have something to read (they reflect the saved file).
+    discard run(s.config, "check", file)
+  else:
+    fds = computeDiagnostics(s.config, file)
   var byUri = initTable[string, string]()   # uri -> JSON array body
   var order: seq[string] = @[]
   # ensure the checked file always publishes (clears old markers)
@@ -322,7 +330,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var ch = 0
     parseDocPos(tree.root, uri, line, ch)
     if hasId:
-      let locs = definition(s.config, uriToPath(uri), pos(line, ch))
+      let locs = definition(s.config, uriToPath(uri), pos(line, ch), docText(s, uri))
       sendResult(idJson, locationsJson(locs))
   of "textDocument/references":
     var uri = ""
@@ -330,7 +338,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var ch = 0
     parseDocPos(tree.root, uri, line, ch)
     if hasId:
-      let locs = references(s.config, uriToPath(uri), pos(line, ch), openDocuments(s))
+      let locs = references(s.config, uriToPath(uri), pos(line, ch), openDocuments(s), docText(s, uri))
       sendResult(idJson, locationsJson(locs))
   of "textDocument/hover":
     var uri = ""
@@ -340,7 +348,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     if hasId:
       # Show the definition's source line (nimony's --def leaves the sig field
       # empty, so the declaration line itself is the useful tooltip).
-      let locs = definition(s.config, uriToPath(uri), pos(line, ch))
+      let locs = definition(s.config, uriToPath(uri), pos(line, ch), docText(s, uri))
       if locs.len > 0:
         let dline = strip(sourceLine(s, locs[0].uri, locs[0].rng.start.line))
         if dline.len > 0:
@@ -360,7 +368,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var ch = 0
     parseDocPos(tree.root, uri, line, ch)
     if hasId:
-      let locs = definition(s.config, uriToPath(uri), pos(line, ch))
+      let locs = definition(s.config, uriToPath(uri), pos(line, ch), docText(s, uri))
       sendResult(idJson, locationsJson(locs))
   of "textDocument/documentHighlight":
     var uri = ""
@@ -370,7 +378,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     if hasId:
       let wlen = docWordLen(s, uri, pos(line, ch))
       sendResult(idJson, documentHighlightsJson(s.config, uriToPath(uri), uri,
-        pos(line, ch), wlen))
+        pos(line, ch), wlen, docText(s, uri)))
   of "textDocument/documentSymbol":
     var uri = ""
     parseUriOnly(tree.root, uri)
@@ -434,7 +442,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
       let wlen = docWordLen(s, uri, pos(line, ch))
       if wlen > 0 and newName.len > 0:
         sendResult(idJson, renameEditJson(s.config, uriToPath(uri),
-          pos(line, ch), wlen, newName, openDocuments(s)))
+          pos(line, ch), wlen, newName, openDocuments(s), docText(s, uri)))
       else:
         sendResult(idJson, "null")
   else:

@@ -6,10 +6,10 @@ import protocol, uris, state, idetools
 import aowlkit/json
 
 proc documentHighlightsJson*(cfg: Config; file, uri: string; p: Position;
-                             wordLen: int): string =
+                             wordLen: int; bufferText = ""): string =
   ## LSP DocumentHighlight[] for the symbol under `p`, restricted to `uri`
   ## (this file). Each range spans the identifier (col .. col+wordLen).
-  let locs = references(cfg, file, p)
+  let locs = references(cfg, file, p, @[], bufferText)
   result = "["
   var first = true
   for i in 0 ..< locs.len:
@@ -23,11 +23,12 @@ proc documentHighlightsJson*(cfg: Config; file, uri: string; p: Position;
   result.add "]"
 
 proc renameEditJson*(cfg: Config; file: string; p: Position; wordLen: int;
-                     newName: string; openDocs: seq[string]): string =
+                     newName: string; openDocs: seq[string];
+                     bufferText = ""): string =
   ## An LSP WorkspaceEdit renaming the symbol under `p` to `newName` across every
   ## reference (in open documents). Each occurrence's identifier span
   ## (col .. col+wordLen) is replaced with `newName`.
-  let locs = references(cfg, file, p, openDocs)
+  let locs = references(cfg, file, p, openDocs, bufferText)
   # group edits by uri
   var uris: seq[string] = @[]
   var bodies: seq[string] = @[]
