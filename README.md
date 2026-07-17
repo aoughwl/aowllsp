@@ -4,7 +4,7 @@ A **Language Server for Nimony, written in Nimony.** A ground-up nimony rewrite
 of the (Nim 2) `nimony-lsp`, so the whole editor stack is self-owned and — the
 end goal — JS-compilable for an in-browser IDE.
 
-> Status: **broad feature coverage.** ~27 LSP methods handled. Navigation and
+> Status: **broad feature coverage.** ~28 LSP methods handled. Navigation and
 > diagnostics run via the `nimony` subprocess; the symbol/token features read NIF
 > artifacts through the nimony-native [aowllens](https://github.com/aoughwl/aowllens).
 > A future browser build swaps both for in-process calls (see the seam below).
@@ -41,6 +41,10 @@ end goal — JS-compilable for an in-browser IDE.
 - **inlayHint** — inferred `: type` hints on un-annotated `let` / `var` /
   `const` bindings, read from the sem'd artifact via `aowllens render` (the
   inferred type is real, not guessed; annotated bindings are left alone).
+- **formatting** — whole-document layout formatting delegated to
+  [aowlfmt](https://github.com/aoughwl/aowlfmt), which proves each reformat
+  preserves program structure before returning it (so the edit can't corrupt
+  the buffer).
 - **foldingRange** and **selectionRange** — indentation/word heuristics.
 - **cache pruning** — the per-module nimcache pool is bounded (LRU eviction on
   `didClose`), so it can't grow without limit.
@@ -63,6 +67,8 @@ first.
 
 - **[aowlkit](https://github.com/aoughwl/aowlkit)** — JSON building, safe
   subprocess capture, temp paths. Consumed via `-p:`; also used by aowlsuggest.
+- **[aowlfmt](https://github.com/aoughwl/aowlfmt)** — the verified layout
+  formatter; `formatting` pipes the buffer through it (`aowlfmt --stdin`).
 - **aowlhl** — the nimony-native NIF reader that Phase-2 in-process nav will link.
 
 ## Layout

@@ -14,7 +14,7 @@ import std/[syncio, json, tables, strutils]
 import aowlkit/json as kjson
 import framing, protocol, uris, state, document, diagnostics, idetools, syntaxdiag
 import driver, symbols, completion, codeactions, semtokens, structure, renamehl
-import hints, typeinfo
+import hints, typeinfo, formatting
 
 const serverVersion = "0.1.0"
 
@@ -297,6 +297,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
       "\"codeLensProvider\":{\"resolveProvider\":true}," &
       "\"documentLinkProvider\":{\"resolveProvider\":false}," &
       "\"inlayHintProvider\":true," &
+      "\"documentFormattingProvider\":true," &
       "\"codeActionProvider\":true," &
       "\"renameProvider\":{\"prepareProvider\":true}," &
       "\"foldingRangeProvider\":true," &
@@ -508,6 +509,11 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     if hasId:
       sendResult(idJson, inlayHintsJson(s.config, uriToPath(uri),
         docText(s, uri)))
+  of "textDocument/formatting":
+    var uri = ""
+    parseUriOnly(tree.root, uri)
+    if hasId:
+      sendResult(idJson, formattingEdits(s.config, docText(s, uri)))
   else:
     if hasId:
       sendResult(idJson, "null")

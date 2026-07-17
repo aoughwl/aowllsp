@@ -36,6 +36,7 @@ msgs=[
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("clean.nim"),"languageId":"nim","version":1,"text":clean}}},
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("dirty.nim"),"languageId":"nim","version":1,"text":"if x = 5:\n  discard\nif y = 6:\n  discard\n"}}},
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("linky.nim"),"languageId":"nim","version":1,"text":open(ROOT+"/linky.nim").read()}}},
+ {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("messy.nim"),"languageId":"nim","version":1,"text":"let a = 1   \n\n\n\nlet b = 2"}}},
  {"jsonrpc":"2.0","id":2,"method":"textDocument/definition","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":2,"character":8}}},
  {"jsonrpc":"2.0","id":3,"method":"textDocument/hover","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":2,"character":8}}},
  {"jsonrpc":"2.0","id":4,"method":"textDocument/references","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":0,"character":5},"context":{"includeDeclaration":True}}},
@@ -48,6 +49,7 @@ msgs=[
  {"jsonrpc":"2.0","id":12,"method":"codeLens/resolve","params":{"range":{"start":{"line":0,"character":5},"end":{"line":0,"character":10}},"data":{"uri":uri("clean.nim"),"line":0,"character":5}}},
  {"jsonrpc":"2.0","id":13,"method":"textDocument/documentLink","params":{"textDocument":{"uri":uri("linky.nim")}}},
  {"jsonrpc":"2.0","id":14,"method":"textDocument/inlayHint","params":{"textDocument":{"uri":uri("clean.nim")},"range":{"start":{"line":0,"character":0},"end":{"line":10,"character":0}}}},
+ {"jsonrpc":"2.0","id":15,"method":"textDocument/formatting","params":{"textDocument":{"uri":uri("messy.nim")},"options":{"tabSize":2,"insertSpaces":True}}},
  {"jsonrpc":"2.0","id":9,"method":"shutdown"},{"jsonrpc":"2.0","method":"exit"},
 ]
 p=subprocess.run([BIN],input=b"".join(frame(m) for m in msgs),capture_output=True,timeout=180)
@@ -126,9 +128,14 @@ check(any("clean" in (l.get("target") or "") for l in dl),
 ih=resps.get(14) or []
 check(any(h.get("label")==": string" and h["position"]["line"]==2 for h in ih),
       "inlayHint infers x: string, got %s"%json.dumps(ih))
+# formatting: a whole-document TextEdit whose newText strips trailing ws + collapses blanks
+fm=resps.get(15) or []
+check(isinstance(fm,list) and len(fm)==1 and
+      fm[0]["newText"]=="let a = 1\n\nlet b = 2\n",
+      "formatting returns normalized edit, got %s"%json.dumps(fm))
 # capabilities advertise the new providers
 capset=set(k for k in (resps.get(1) or {}).get("capabilities",{}))
-for cap in ["documentSymbolProvider","completionProvider","semanticTokensProvider","renameProvider","codeActionProvider","signatureHelpProvider","codeLensProvider","documentLinkProvider","inlayHintProvider"]:
+for cap in ["documentSymbolProvider","completionProvider","semanticTokensProvider","renameProvider","codeActionProvider","signatureHelpProvider","codeLensProvider","documentLinkProvider","inlayHintProvider","documentFormattingProvider"]:
     check(cap in capset, "capability %s advertised"%cap)
 
 print("smoke: PASS" if not fail else "smoke: FAILURES above")
