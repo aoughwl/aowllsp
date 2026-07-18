@@ -96,13 +96,32 @@ proc receiverAt(bufferText: string; line, col: int; startCol: var int): string =
   while i >= 0 and isIdentChar(ln[i]): dec i
   # the char immediately before the prefix must be the member dot
   if i < 0 or ln[i] != '.': return ""
-  # the receiver is the identifier ending just left of that dot
+  # The token left of the dot is the receiver. If it ends in a CALL `)` or INDEX
+  # `]` suffix (`foo().`, `xs[i].`), bracket-match back over the suffix so we land
+  # on the HEAD identifier — the callee / container. `typeat` on that head returns
+  # the call's / index's result type (a routine or the `[]` operator resolves to
+  # its return type), which IS the receiver expression's type.
+  var k = i - 1
+  if k >= 0 and (ln[k] == ')' or ln[k] == ']'):
+    let closeCh = ln[k]
+    let openCh = if closeCh == ')': '(' else: '['
+    var depth = 0
+    while k >= 0:
+      if ln[k] == closeCh: inc depth
+      elif ln[k] == openCh:
+        dec depth
+        if depth == 0: break
+      dec k
+    if k < 0: return ""            # unbalanced on this line — give up (fall back)
+    dec k                          # step to just before the matching open bracket
+  # read the head identifier ending at k
   var acc = ""
-  var j = i - 1
+  var j = k
   while j >= 0 and isIdentChar(ln[j]):
     acc.add ln[j]
     dec j
-  startCol = j + 1                # first char of the receiver identifier
+  if acc.len == 0: return ""       # e.g. `(a + b).x` — no head identifier to resolve
+  startCol = j + 1                 # first char of the head identifier
   result = reversed(acc)
 
 # ── member-access LSP kind mapping ──────────────────────────────────────────

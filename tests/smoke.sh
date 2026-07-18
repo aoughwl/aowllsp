@@ -49,6 +49,20 @@ type
 proc f(o: Outer) =
   discard o.inner.x
 EOF
+cat > "$WORK/expr.nim" <<'EOF'
+type
+  Cell = object
+    x: int
+    y: int
+  Grid = object
+    cells: seq[Cell]
+
+proc make(): Grid = Grid()
+
+proc f(g: Grid) =
+  discard make().cells
+  discard g.cells[0].x
+EOF
 cat > "$WORK/linky.nim" <<'EOF'
 import clean
 echo "linked"
@@ -73,6 +87,7 @@ msgs=[
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("calls.nim"),"languageId":"nim","version":1,"text":open(ROOT+"/calls.nim").read()}}},
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("th.nim"),"languageId":"nim","version":1,"text":open(ROOT+"/th.nim").read()}}},
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("chain.nim"),"languageId":"nim","version":1,"text":open(ROOT+"/chain.nim").read()}}},
+ {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("expr.nim"),"languageId":"nim","version":1,"text":open(ROOT+"/expr.nim").read()}}},
  {"jsonrpc":"2.0","id":2,"method":"textDocument/definition","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":2,"character":8}}},
  {"jsonrpc":"2.0","id":3,"method":"textDocument/hover","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":2,"character":8}}},
  {"jsonrpc":"2.0","id":4,"method":"textDocument/references","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":0,"character":5},"context":{"includeDeclaration":True}}},
@@ -99,6 +114,8 @@ msgs=[
  {"jsonrpc":"2.0","id":26,"method":"textDocument/codeAction","params":{"textDocument":{"uri":uri("messy.nim")},"range":{"start":{"line":0,"character":0},"end":{"line":4,"character":0}},"context":{"diagnostics":[],"only":["source.fixAll"]}}},
  {"jsonrpc":"2.0","id":27,"method":"textDocument/completion","params":{"textDocument":{"uri":uri("th.nim")},"position":{"line":11,"character":12}}},
  {"jsonrpc":"2.0","id":28,"method":"textDocument/completion","params":{"textDocument":{"uri":uri("chain.nim")},"position":{"line":9,"character":18}}},
+ {"jsonrpc":"2.0","id":29,"method":"textDocument/completion","params":{"textDocument":{"uri":uri("expr.nim")},"position":{"line":10,"character":17}}},
+ {"jsonrpc":"2.0","id":30,"method":"textDocument/completion","params":{"textDocument":{"uri":uri("expr.nim")},"position":{"line":11,"character":21}}},
  {"jsonrpc":"2.0","id":9,"method":"shutdown"},{"jsonrpc":"2.0","method":"exit"},
 ]
 p=subprocess.run([BIN],input=b"".join(frame(m) for m in msgs),capture_output=True,timeout=180)
@@ -224,6 +241,15 @@ check("x" in ccnames and "y" in ccnames,
       "field-chain completion offers Inner's fields, got %s"%sorted(ccnames))
 check("inner" not in ccnames and "tag" not in ccnames,
       "field-chain completion resolved through the chain (not Outer's fields), got %s"%sorted(ccnames))
+# CALL-RESULT receiver: `make().` where make(): Grid offers Grid's fields (cells).
+crnames=set(it.get("label") for it in (resps.get(29) or {}).get("items",[]))
+check("cells" in crnames and "x" not in crnames,
+      "call-result completion offers the return type's fields, got %s"%sorted(crnames))
+# INDEX-RESULT receiver: `g.cells[0].` where cells: seq[Cell] offers Cell's fields
+# (x,y) — the '[]' element type — NOT Grid's field 'cells'.
+ixnames=set(it.get("label") for it in (resps.get(30) or {}).get("items",[]))
+check("x" in ixnames and "y" in ixnames and "cells" not in ixnames,
+      "index-result completion offers the element type's fields, got %s"%sorted(ixnames))
 # style integration (initializationOptions.pedantic=true): messy.nim's trailing
 # whitespace surfaces as an aowlsuggest diagnostic live in the editor
 mstyle=[d for n in notifs if n["params"]["uri"]==uri("messy.nim")
