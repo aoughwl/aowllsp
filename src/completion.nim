@@ -79,10 +79,12 @@ proc prefixAt(bufferText: string; line, col: int): string =
     dec i
   result = reversed(acc)
 
-proc receiverAt(bufferText: string; line, col: int): string =
+proc receiverAt(bufferText: string; line, col: int; startCol: var int): string =
   ## If the cursor is at `receiver.<prefix>` (a `.` immediately precedes the
-  ## identifier prefix under the cursor), return the `receiver` identifier — the
-  ## bare name to resolve a type for. "" when this is not a member access.
+  ## identifier prefix under the cursor), return the `receiver` identifier and set
+  ## `startCol` to the column where it begins (for a position-precise type query).
+  ## "" when this is not a member access.
+  startCol = -1
   var lines = split(bufferText, '\n')
   if line < 0 or line >= lines.len: return ""
   let ln = lines[line]
@@ -100,6 +102,7 @@ proc receiverAt(bufferText: string; line, col: int): string =
   while j >= 0 and isIdentChar(ln[j]):
     acc.add ln[j]
     dec j
+  startCol = j + 1                # first char of the receiver identifier
   result = reversed(acc)
 
 # ── member-access LSP kind mapping ──────────────────────────────────────────
@@ -185,6 +188,24 @@ proc collectExports(cfg: Config; snif, prefix: string;
         of "sym": sym = getStr(v2)
         else: discard
       addCand(name, kd, sym, prefix, seen, names, kindOf, detailOf)
+
+proc typeAtQuery(cfg: Config; snif: string; line, col: int): string =
+  ## `aowllens typeat <snif> <line> <col>` → the type base name at that position,
+  ## or "" if nothing resolves. `line` is 1-based, `col` 0-based (NIF convention).
+  if cfg.aowllensExe.len == 0 or snif.len == 0: return ""
+  let cap = runCaptured(cfg.aowllensExe,
+                        @["typeat", snif, $line, $col], "", true)
+  if not cap.ok: return ""
+  var tree = default(JsonTree)
+  try:
+    tree = parseJson(cap.output)
+  except:
+    return ""
+  let obj = tree.root
+  if kind(obj) != JObject: return ""
+  for k, v in pairs(obj):
+    if k == "type": return getStr(v)
+  return ""
 
 proc collectMembers(cfg: Config; snif, receiver, prefix: string;
                     seen: var HashSet[string]; names: var seq[string];
@@ -276,14 +297,29 @@ proc completions*(cfg: Config; file: string; line, col: int;
   let snifs = lspSnifs(cfg)
 
   # MEMBER ACCESS: `receiver.<prefix>` → resolve the receiver's type and offer
-  # ONLY its members (fields/enum-values/first-param routines). Query this file's
-  # artifact first, then the warm cache (the type may be defined in an import).
-  # If nothing resolves, fall through to plain prefix completion below.
-  let receiver = receiverAt(bufferText, line, col)
+  # ONLY its members (fields/enum-values/first-param routines).
+  #   1. POSITION-PRECISE: ask aowllens `typeat` for the type of the expression at
+  #      the receiver's position — this resolves field chains (`a.b.c.`) and
+  #      shadowed names exactly, since each occurrence carries its own symbol.
+  #   2. NAME-BASED fallback: resolve the receiver identifier by name.
+  #   3. Plain prefix completion, if neither resolves.
+  # Members are gathered from this file's artifact and the warm cache (the type
+  # may be defined in an import).
+  var recvStart = -1
+  let receiver = receiverAt(bufferText, line, col, recvStart)
   if receiver.len > 0:
-    collectMembers(cfg, mine, receiver, prefix, seen, names, kindOf, detailOf)
-    for i in 0 ..< snifs.len:
-      collectMembers(cfg, snifs[i], receiver, prefix, seen, names, kindOf, detailOf)
+    # 1. position-precise type resolution (line is 1-based for the NIF)
+    if recvStart >= 0:
+      let resolved = typeAtQuery(cfg, mine, line + 1, recvStart)
+      if resolved.len > 0:
+        collectMembers(cfg, mine, resolved, prefix, seen, names, kindOf, detailOf)
+        for i in 0 ..< snifs.len:
+          collectMembers(cfg, snifs[i], resolved, prefix, seen, names, kindOf, detailOf)
+    # 2. name-based fallback when the position query found nothing
+    if names.len == 0:
+      collectMembers(cfg, mine, receiver, prefix, seen, names, kindOf, detailOf)
+      for i in 0 ..< snifs.len:
+        collectMembers(cfg, snifs[i], receiver, prefix, seen, names, kindOf, detailOf)
     if names.len > 0:
       sortNames(names)
       if names.len > cap: names.setLen(cap)

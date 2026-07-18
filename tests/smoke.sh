@@ -37,6 +37,18 @@ proc wag(d: Dog): bool = true
 proc handle(d: Dog) =
   discard d.name
 EOF
+cat > "$WORK/chain.nim" <<'EOF'
+type
+  Inner = object
+    x: int
+    y: int
+  Outer = object
+    inner: Inner
+    tag: string
+
+proc f(o: Outer) =
+  discard o.inner.x
+EOF
 cat > "$WORK/linky.nim" <<'EOF'
 import clean
 echo "linked"
@@ -60,6 +72,7 @@ msgs=[
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("messy.nim"),"languageId":"nim","version":1,"text":"let a = 1   \n\n\n\nlet b = 2"}}},
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("calls.nim"),"languageId":"nim","version":1,"text":open(ROOT+"/calls.nim").read()}}},
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("th.nim"),"languageId":"nim","version":1,"text":open(ROOT+"/th.nim").read()}}},
+ {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("chain.nim"),"languageId":"nim","version":1,"text":open(ROOT+"/chain.nim").read()}}},
  {"jsonrpc":"2.0","id":2,"method":"textDocument/definition","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":2,"character":8}}},
  {"jsonrpc":"2.0","id":3,"method":"textDocument/hover","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":2,"character":8}}},
  {"jsonrpc":"2.0","id":4,"method":"textDocument/references","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":0,"character":5},"context":{"includeDeclaration":True}}},
@@ -85,6 +98,7 @@ msgs=[
  {"jsonrpc":"2.0","id":25,"method":"textDocument/codeAction","params":{"textDocument":{"uri":uri("dirty.nim")},"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":9}},"context":{"diagnostics":[],"only":["quickfix"]}}},
  {"jsonrpc":"2.0","id":26,"method":"textDocument/codeAction","params":{"textDocument":{"uri":uri("messy.nim")},"range":{"start":{"line":0,"character":0},"end":{"line":4,"character":0}},"context":{"diagnostics":[],"only":["source.fixAll"]}}},
  {"jsonrpc":"2.0","id":27,"method":"textDocument/completion","params":{"textDocument":{"uri":uri("th.nim")},"position":{"line":11,"character":12}}},
+ {"jsonrpc":"2.0","id":28,"method":"textDocument/completion","params":{"textDocument":{"uri":uri("chain.nim")},"position":{"line":9,"character":18}}},
  {"jsonrpc":"2.0","id":9,"method":"shutdown"},{"jsonrpc":"2.0","method":"exit"},
 ]
 p=subprocess.run([BIN],input=b"".join(frame(m) for m in msgs),capture_output=True,timeout=180)
@@ -201,6 +215,15 @@ check("breed" in mcnames and "name" in mcnames and "wag" in mcnames,
       "member completion offers own+inherited+UFCS members, got %s"%sorted(mcnames))
 check("Cat" not in mcnames and "Animal" not in mcnames and "Dog" not in mcnames,
       "member completion is type-directed (no sibling/unrelated types), got %s"%sorted(mcnames))
+# POSITION-PRECISE field chain: `o.inner.` where o:Outer, inner:Inner resolves
+# via `aowllens typeat` to Inner and offers Inner's fields (x,y) — NOT Outer's
+# own fields (inner,tag). This is the case a by-name receiver lookup can't do.
+cc=resps.get(28) or {}
+ccnames=set(it.get("label") for it in cc.get("items",[]))
+check("x" in ccnames and "y" in ccnames,
+      "field-chain completion offers Inner's fields, got %s"%sorted(ccnames))
+check("inner" not in ccnames and "tag" not in ccnames,
+      "field-chain completion resolved through the chain (not Outer's fields), got %s"%sorted(ccnames))
 # style integration (initializationOptions.pedantic=true): messy.nim's trailing
 # whitespace surfaces as an aowlsuggest diagnostic live in the editor
 mstyle=[d for n in notifs if n["params"]["uri"]==uri("messy.nim")
