@@ -208,6 +208,28 @@ proc collectExports(cfg: Config; snif, prefix: string;
         else: discard
       addCand(name, kd, sym, prefix, seen, names, kindOf, detailOf)
 
+proc massageMemberAccess(bufferText: string; line, dotCol: int): string =
+  ## Blank the member-access dot and the partial member name after it, so a line
+  ## the user is mid-typing (`o.inner.xy`, or a dangling `o.inner.`) PARSES —
+  ## otherwise nimony rejects the whole module and there is no `.s.nif` to resolve
+  ## the receiver's type against. Every column left of the dot is preserved, so a
+  ## position query still lands on the same receiver symbol.
+  var lines = split(bufferText, '\n')
+  if line < 0 or line >= lines.len: return bufferText
+  let ln = lines[line]
+  if dotCol < 0 or dotCol >= ln.len or ln[dotCol] != '.': return bufferText
+  var e = dotCol + 1
+  while e < ln.len and isIdentChar(ln[e]): inc e
+  var res = ""
+  for k in 0 ..< ln.len:
+    if k >= dotCol and k < e: res.add ' '
+    else: res.add ln[k]
+  lines[line] = res
+  result = ""
+  for k in 0 ..< lines.len:
+    if k > 0: result.add '\n'
+    result.add lines[k]
+
 proc typeAtQuery(cfg: Config; snif: string; line, col: int): string =
   ## `aowllens typeat <snif> <line> <col>` → the type base name at that position,
   ## or "" if nothing resolves. `line` is 1-based, `col` 0-based (NIF convention).
@@ -327,16 +349,25 @@ proc completions*(cfg: Config; file: string; line, col: int;
   var recvStart = -1
   let receiver = receiverAt(bufferText, line, col, recvStart)
   if receiver.len > 0:
+    # The live buffer is usually mid-edit (`o.inner.` / `o.inner.xy`), which does
+    # NOT parse — so compile a MASSAGED copy (the dangling member access blanked,
+    # columns preserved) to get a fresh `.s.nif` that reflects the in-flight edit.
+    # Fall back to the last on-disk artifact if that compile yields nothing.
+    var typeSnif = mine
+    let dotCol = col - prefix.len - 1
+    let massaged = massageMemberAccess(bufferText, line, dotCol)
+    let live = liveArtifact(cfg, file, massaged, ".s.nif")
+    if live.len > 0: typeSnif = live
     # 1. position-precise type resolution (line is 1-based for the NIF)
     if recvStart >= 0:
-      let resolved = typeAtQuery(cfg, mine, line + 1, recvStart)
+      let resolved = typeAtQuery(cfg, typeSnif, line + 1, recvStart)
       if resolved.len > 0:
-        collectMembers(cfg, mine, resolved, prefix, seen, names, kindOf, detailOf)
+        collectMembers(cfg, typeSnif, resolved, prefix, seen, names, kindOf, detailOf)
         for i in 0 ..< snifs.len:
           collectMembers(cfg, snifs[i], resolved, prefix, seen, names, kindOf, detailOf)
     # 2. name-based fallback when the position query found nothing
     if names.len == 0:
-      collectMembers(cfg, mine, receiver, prefix, seen, names, kindOf, detailOf)
+      collectMembers(cfg, typeSnif, receiver, prefix, seen, names, kindOf, detailOf)
       for i in 0 ..< snifs.len:
         collectMembers(cfg, snifs[i], receiver, prefix, seen, names, kindOf, detailOf)
     if names.len > 0:

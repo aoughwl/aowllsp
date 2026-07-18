@@ -73,6 +73,35 @@ proc mainArtifact*(cfg: Config; file, ext: string): string =
     if result.len == 0 or mt >= best:
       best = mt; result = arts[i]
 
+proc liveArtifact*(cfg: Config; file, bufferText, ext: string): string =
+  ## Compile the (possibly massaged) live `bufferText` and return the freshest
+  ## matching artifact from the ISOLATED `-live` nimcache — the snif for the
+  ## in-flight buffer, not the last-saved file. "" if the compile produced none.
+  ## Used by completion so a member query reflects unsaved edits.
+  # NB: pass `track` EXPLICITLY (not via its default) — calling through the
+  # defaulted `seq[string]=@[]` param trips a nimony hexer bug (isTrivial at
+  # decls.nim:46) during this module's build.
+  discard runLiveCheck(cfg, file, bufferText, @[])
+  let dir = moduleCacheDir(cfg, canonFile(cfg, file)) & "-live"
+  if not dirExists(dir): return ""
+  # nimony names artifacts by its own scheme, not the temp basename; the module
+  # under compilation is written last, so the NEWEST matching artifact is ours —
+  # the same heuristic `mainArtifact` uses for the on-disk cache.
+  result = ""
+  var best = 0'i64
+  try:
+    for kind, p in walkDir(path(dir)):
+      if kind != pcFile: continue
+      let ps = $p
+      if endsWith(ps, ext) and not endsWith(ps, ".idx.nif"):
+        var mt = 0'i64
+        try: mt = getLastModificationTime(ps)
+        except: mt = 0'i64
+        if result.len == 0 or mt >= best:
+          best = mt; result = ps
+  except:
+    discard
+
 proc pruneCaches*(cfg: Config; budgetBytes = 1_000_000_000) =
   ## Bound the nimcache/lsp pool: if it exceeds `budgetBytes`, evict whole
   ## per-module cache dirs oldest-first (by mtime) until back under budget.

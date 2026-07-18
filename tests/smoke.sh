@@ -63,6 +63,19 @@ proc f(g: Grid) =
   discard make().cells
   discard g.cells[0].x
 EOF
+# an INCOMPLETE buffer (dangling '.') — does NOT parse as-is; completion must
+# massage it before resolving the receiver's type.
+cat > "$WORK/inc.nim" <<'EOF'
+type
+  Inner = object
+    x: int
+    y: int
+  Outer = object
+    inner: Inner
+
+proc f(o: Outer) =
+  discard o.inner.
+EOF
 cat > "$WORK/linky.nim" <<'EOF'
 import clean
 echo "linked"
@@ -88,6 +101,7 @@ msgs=[
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("th.nim"),"languageId":"nim","version":1,"text":open(ROOT+"/th.nim").read()}}},
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("chain.nim"),"languageId":"nim","version":1,"text":open(ROOT+"/chain.nim").read()}}},
  {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("expr.nim"),"languageId":"nim","version":1,"text":open(ROOT+"/expr.nim").read()}}},
+ {"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":uri("inc.nim"),"languageId":"nim","version":1,"text":open(ROOT+"/inc.nim").read()}}},
  {"jsonrpc":"2.0","id":2,"method":"textDocument/definition","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":2,"character":8}}},
  {"jsonrpc":"2.0","id":3,"method":"textDocument/hover","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":2,"character":8}}},
  {"jsonrpc":"2.0","id":4,"method":"textDocument/references","params":{"textDocument":{"uri":uri("clean.nim")},"position":{"line":0,"character":5},"context":{"includeDeclaration":True}}},
@@ -116,6 +130,7 @@ msgs=[
  {"jsonrpc":"2.0","id":28,"method":"textDocument/completion","params":{"textDocument":{"uri":uri("chain.nim")},"position":{"line":9,"character":18}}},
  {"jsonrpc":"2.0","id":29,"method":"textDocument/completion","params":{"textDocument":{"uri":uri("expr.nim")},"position":{"line":10,"character":17}}},
  {"jsonrpc":"2.0","id":30,"method":"textDocument/completion","params":{"textDocument":{"uri":uri("expr.nim")},"position":{"line":11,"character":21}}},
+ {"jsonrpc":"2.0","id":31,"method":"textDocument/completion","params":{"textDocument":{"uri":uri("inc.nim")},"position":{"line":8,"character":18}}},
  {"jsonrpc":"2.0","id":9,"method":"shutdown"},{"jsonrpc":"2.0","method":"exit"},
 ]
 p=subprocess.run([BIN],input=b"".join(frame(m) for m in msgs),capture_output=True,timeout=180)
@@ -250,6 +265,13 @@ check("cells" in crnames and "x" not in crnames,
 ixnames=set(it.get("label") for it in (resps.get(30) or {}).get("items",[]))
 check("x" in ixnames and "y" in ixnames and "cells" not in ixnames,
       "index-result completion offers the element type's fields, got %s"%sorted(ixnames))
+# INCOMPLETE BUFFER: `o.inner.` with a dangling dot does not parse; completion
+# massages it, live-compiles, and still offers Inner's fields (x,y).
+incnames=set(it.get("label") for it in (resps.get(31) or {}).get("items",[]))
+check("x" in incnames and "y" in incnames,
+      "incomplete-buffer completion resolves via massage, got %s"%sorted(incnames))
+check("inner" not in incnames and "tag" not in incnames,
+      "incomplete-buffer completion is type-directed (Inner not Outer), got %s"%sorted(incnames))
 # style integration (initializationOptions.pedantic=true): messy.nim's trailing
 # whitespace surfaces as an aowlsuggest diagnostic live in the editor
 mstyle=[d for n in notifs if n["params"]["uri"]==uri("messy.nim")
