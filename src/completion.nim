@@ -8,12 +8,19 @@
 ##   3. `aowllens decls` on EVERY `*.s.nif` under `<projectRoot>/nimcache/lsp/`
 ##      — so symbols from imported modules are offered too.
 ##
+## MEMBER ACCESS (`receiver.<here>`) is TYPE-DIRECTED: when the cursor sits after
+## `ident.`, we resolve `ident` to its type via `aowllens members <snif> <ident>`
+## and offer ONLY that type's fields, enum values, and the routines that take it as
+## their first parameter (UFCS/methods), following `object of Base` for inherited
+## members. If the receiver can't be resolved (an expression, an unknown name), we
+## fall back to plain prefix completion so nothing is ever lost.
+##
 ## LIMITATIONS (honest scope):
-##   * No scope-awareness — every module-level symbol in the warm cache is a
-##     candidate regardless of whether it is actually visible at the cursor.
-##   * `.`-member access is treated exactly like plain prefix completion: we do
-##     NOT resolve the receiver's type and offer only its fields/methods; the
-##     prefix after the dot just filters the same global candidate pool.
+##   * No scope-awareness for PLAIN completion — every module-level symbol in the
+##     warm cache is a candidate regardless of visibility at the cursor.
+##   * Member resolution is by NAME: a bare-identifier receiver (a local/param/
+##     global binding or a type name). A compound receiver (`a.b.`) resolves only
+##     if the trailing name `b` is itself a resolvable binding/type.
 ##   * Filtering is a case-sensitive prefix match on the demangled name.
 
 import std/[strutils, os, dirs, paths, tables, sets, json]
@@ -71,6 +78,40 @@ proc prefixAt(bufferText: string; line, col: int): string =
     acc.add ln[i]
     dec i
   result = reversed(acc)
+
+proc receiverAt(bufferText: string; line, col: int): string =
+  ## If the cursor is at `receiver.<prefix>` (a `.` immediately precedes the
+  ## identifier prefix under the cursor), return the `receiver` identifier — the
+  ## bare name to resolve a type for. "" when this is not a member access.
+  var lines = split(bufferText, '\n')
+  if line < 0 or line >= lines.len: return ""
+  let ln = lines[line]
+  var c = col
+  if c > ln.len: c = ln.len
+  if c < 0: c = 0
+  # step back over the identifier prefix currently being typed
+  var i = c - 1
+  while i >= 0 and isIdentChar(ln[i]): dec i
+  # the char immediately before the prefix must be the member dot
+  if i < 0 or ln[i] != '.': return ""
+  # the receiver is the identifier ending just left of that dot
+  var acc = ""
+  var j = i - 1
+  while j >= 0 and isIdentChar(ln[j]):
+    acc.add ln[j]
+    dec j
+  result = reversed(acc)
+
+# ── member-access LSP kind mapping ──────────────────────────────────────────
+
+proc memberKindToLsp(kind: string): int =
+  ## NIF member tag → LSP CompletionItemKind int.
+  if kind == "fld": 5            # Field
+  elif kind == "efld": 20       # EnumMember
+  elif kind == "method": 2      # Method
+  elif among(kind, ["proc", "func", "converter", "iterator", "template", "macro"]):
+    3                           # Function
+  else: 1                       # Text
 
 # ── candidate collection ────────────────────────────────────────────────────
 
@@ -145,6 +186,42 @@ proc collectExports(cfg: Config; snif, prefix: string;
         else: discard
       addCand(name, kd, sym, prefix, seen, names, kindOf, detailOf)
 
+proc collectMembers(cfg: Config; snif, receiver, prefix: string;
+                    seen: var HashSet[string]; names: var seq[string];
+                    kindOf: var Table[string, int];
+                    detailOf: var Table[string, string]) =
+  ## `aowllens members <snif> <receiver>` → a JSON array of {name,kind,detail}.
+  ## Adds each member (filtered by `prefix`) to the candidate set. Members that
+  ## begin with an operator char (a symbolic proc a `.` can't reach) are skipped.
+  if cfg.aowllensExe.len == 0 or snif.len == 0 or receiver.len == 0: return
+  let cap = runCaptured(cfg.aowllensExe, @["members", snif, receiver], "", true)
+  if not cap.ok: return
+  var tree = default(JsonTree)
+  try:
+    tree = parseJson(cap.output)
+  except:
+    return
+  var arr = tree.root
+  if kind(arr) != JArray: return
+  for el in items(arr):
+    if kind(el) != JObject: continue
+    var name = ""
+    var kd = ""
+    var detail = ""
+    for k, v in pairs(el):
+      case k
+      of "name": name = getStr(v)
+      of "kind": kd = getStr(v)
+      of "detail": detail = getStr(v)
+      else: discard
+    if name.len == 0: continue
+    if not isIdentChar(name[0]): continue           # skip symbolic operators
+    if prefix.len > 0 and not startsWith(name, prefix): continue
+    if seen.containsOrIncl(name): continue
+    names.add name
+    kindOf[name] = memberKindToLsp(kd)
+    detailOf[name] = detail
+
 proc lspSnifs(cfg: Config): seq[string] =
   ## Every `*.s.nif` under `<projectRoot>/nimcache/lsp/` (one dir per module).
   result = @[]
@@ -195,13 +272,37 @@ proc completions*(cfg: Config; file: string; line, col: int;
   var kindOf = initTable[string, int]()
   var detailOf = initTable[string, string]()
 
-  # 1+2: this file's own decls and exports.
   let mine = mainArtifact(cfg, file, ".s.nif")
+  let snifs = lspSnifs(cfg)
+
+  # MEMBER ACCESS: `receiver.<prefix>` → resolve the receiver's type and offer
+  # ONLY its members (fields/enum-values/first-param routines). Query this file's
+  # artifact first, then the warm cache (the type may be defined in an import).
+  # If nothing resolves, fall through to plain prefix completion below.
+  let receiver = receiverAt(bufferText, line, col)
+  if receiver.len > 0:
+    collectMembers(cfg, mine, receiver, prefix, seen, names, kindOf, detailOf)
+    for i in 0 ..< snifs.len:
+      collectMembers(cfg, snifs[i], receiver, prefix, seen, names, kindOf, detailOf)
+    if names.len > 0:
+      sortNames(names)
+      if names.len > cap: names.setLen(cap)
+      var mitems = ""
+      for i in 0 ..< names.len:
+        let nm = names[i]
+        let ki = getOrDefault(kindOf, nm, 1)
+        let dt = getOrDefault(detailOf, nm, "")
+        if mitems.len > 0: mitems.add ","
+        mitems.add "{\"label\":" & jStr(nm) &
+                   ",\"kind\":" & $ki &
+                   ",\"detail\":" & jStr(dt) & "}"
+      return "{\"isIncomplete\":false,\"items\":[" & mitems & "]}"
+
+  # 1+2: this file's own decls and exports.
   collectDecls(cfg, mine, prefix, seen, names, kindOf, detailOf)
   collectExports(cfg, mine, prefix, seen, names, kindOf, detailOf)
 
   # 3: decls from every module in the warm LSP cache (imported symbols).
-  let snifs = lspSnifs(cfg)
   for i in 0 ..< snifs.len:
     if names.len >= cap and prefix.len == 0: break
     collectDecls(cfg, snifs[i], prefix, seen, names, kindOf, detailOf)

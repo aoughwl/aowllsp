@@ -31,6 +31,11 @@ type
     breed: string
   Cat = ref object of Animal
     indoor: bool
+
+proc wag(d: Dog): bool = true
+
+proc handle(d: Dog) =
+  discard d.name
 EOF
 cat > "$WORK/linky.nim" <<'EOF'
 import clean
@@ -79,6 +84,7 @@ msgs=[
  {"jsonrpc":"2.0","id":24,"method":"textDocument/codeAction","params":{"textDocument":{"uri":uri("dirty.nim")},"range":{"start":{"line":0,"character":0},"end":{"line":3,"character":0}},"context":{"diagnostics":[],"only":["source.fixAll"]}}},
  {"jsonrpc":"2.0","id":25,"method":"textDocument/codeAction","params":{"textDocument":{"uri":uri("dirty.nim")},"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":9}},"context":{"diagnostics":[],"only":["quickfix"]}}},
  {"jsonrpc":"2.0","id":26,"method":"textDocument/codeAction","params":{"textDocument":{"uri":uri("messy.nim")},"range":{"start":{"line":0,"character":0},"end":{"line":4,"character":0}},"context":{"diagnostics":[],"only":["source.fixAll"]}}},
+ {"jsonrpc":"2.0","id":27,"method":"textDocument/completion","params":{"textDocument":{"uri":uri("th.nim")},"position":{"line":11,"character":12}}},
  {"jsonrpc":"2.0","id":9,"method":"shutdown"},{"jsonrpc":"2.0","method":"exit"},
 ]
 p=subprocess.run([BIN],input=b"".join(frame(m) for m in msgs),capture_output=True,timeout=180)
@@ -186,6 +192,15 @@ sup=resps.get(22) or []
 check(any(t["name"]=="Animal" for t in sup),"supertypes(Dog)=Animal, got %s"%json.dumps(sup))
 sub=resps.get(23) or []
 check(set(t["name"] for t in sub)=={"Dog","Cat"},"subtypes(Animal)=Dog+Cat, got %s"%json.dumps(sub))
+# TYPE-DIRECTED member completion: `d.` where d:Dog offers Dog's own field
+# `breed`, the inherited `name`, and the UFCS proc `wag` — and NOT the sibling
+# type `Cat` (which the old global-pool completion would have surfaced).
+mc=resps.get(27) or {}
+mcnames=set(it.get("label") for it in mc.get("items",[]))
+check("breed" in mcnames and "name" in mcnames and "wag" in mcnames,
+      "member completion offers own+inherited+UFCS members, got %s"%sorted(mcnames))
+check("Cat" not in mcnames and "Animal" not in mcnames and "Dog" not in mcnames,
+      "member completion is type-directed (no sibling/unrelated types), got %s"%sorted(mcnames))
 # style integration (initializationOptions.pedantic=true): messy.nim's trailing
 # whitespace surfaces as an aowlsuggest diagnostic live in the editor
 mstyle=[d for n in notifs if n["params"]["uri"]==uri("messy.nim")
