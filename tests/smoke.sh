@@ -190,9 +190,17 @@ check(set(t["name"] for t in sub)=={"Dog","Cat"},"subtypes(Animal)=Dog+Cat, got 
 # whitespace surfaces as an aowlsuggest diagnostic live in the editor
 mstyle=[d for n in notifs if n["params"]["uri"]==uri("messy.nim")
           for d in n["params"]["diagnostics"]
-          if d.get("source")=="aowlsuggest" and "trailing-whitespace" in d.get("message","")]
+          if d.get("source")=="aowlsuggest" and d.get("code")=="trailing-whitespace"]
 check(mstyle,"pedantic surfaces trailing-whitespace on messy.nim, got %s"%
       json.dumps([n["params"]["diagnostics"] for n in notifs if n["params"]["uri"]==uri("messy.nim")]))
+# the diagnostic carries LSP's `code` field + a codeDescription href (rule link)
+check(mstyle and mstyle[0].get("codeDescription",{}).get("href","").startswith("http"),
+      "diagnostic has codeDescription href, got %s"%json.dumps(mstyle[:1]))
+# syntax diagnostics on the dirty buffer also carry their rule id in `code`
+dcode=[d for n in notifs if n["params"]["uri"]==uri("dirty.nim")
+         for d in n["params"]["diagnostics"]
+         if d.get("source")=="aowlsuggest" and d.get("code")=="assignment-in-condition"]
+check(dcode,"syntax diagnostic carries code=assignment-in-condition")
 # source.fixAll on dirty.nim: one action, kind source.fixAll, whose whole-doc edit
 # has the verified repair applied (= -> ==) keyed under the document URI
 fa=resps.get(24) or []

@@ -37,10 +37,13 @@ proc parseOne(el: JsonNode; file: string; d: var FileDiag): bool =
   let l = if line > 0: line - 1 else: 0
   var ec = endCol
   if ec <= col: ec = col + 1
-  let fullMsg = if code.len > 0: msg & " [" & code & "]" else: msg
+  # The rule id goes in LSP's `code` field (so editors can show/filter by it and
+  # offer a rule link), NOT smuggled into the message text.
+  let href = if code.len > 0:
+    "https://github.com/aoughwl/aowlsuggest#fix" else: ""
   d = FileDiag(file: file, diag: Diagnostic(
     rng: mkRange(l, col, l, ec), severity: sev, source: "aowlsuggest",
-    message: fullMsg, related: @[]))
+    message: msg, code: code, codeHref: href, related: @[]))
   return true
 
 proc syntaxDiagnostics*(cfg: Config; file, bufferText: string): seq[FileDiag] =

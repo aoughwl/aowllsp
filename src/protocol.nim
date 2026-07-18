@@ -30,6 +30,8 @@ type
     severity*: DiagnosticSeverity
     source*: string
     message*: string
+    code*: string           ## LSP Diagnostic.code (the rule id); "" = omit
+    codeHref*: string       ## codeDescription.href (rule docs); "" = omit
     related*: seq[RelatedInfo]
 
 proc pos*(line, character: int): Position =
@@ -60,6 +62,10 @@ proc diagnosticJson*(d: Diagnostic): string =
     ",\"severity\":" & $severityNum(d.severity) &
     ",\"source\":" & jStr(d.source) &
     ",\"message\":" & jStr(d.message)
+  if d.code.len > 0:
+    result.add ",\"code\":" & jStr(d.code)
+    if d.codeHref.len > 0:
+      result.add ",\"codeDescription\":{\"href\":" & jStr(d.codeHref) & "}"
   if d.related.len > 0:
     result.add ",\"relatedInformation\":["
     for i in 0 ..< d.related.len:

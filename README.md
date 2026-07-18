@@ -20,7 +20,9 @@ end goal — JS-compilable for an in-browser IDE.
   back), grouped by URI, `Trace` lines as `relatedInformation`, **plus**
   recovering *syntax* diagnostics from
   [aowlsuggest](https://github.com/aoughwl/aowlsuggest) over the same buffer —
-  so both semantic and syntax errors reflect what you're typing.
+  so both semantic and syntax errors reflect what you're typing. Each
+  aowlsuggest diagnostic carries its rule id in LSP's `code` field (so editors
+  can show/filter by it) plus a `codeDescription` rule link.
 - **Navigation** — go to **definition**, **declaration**, **typeDefinition**,
   **implementation**, find **references**, **documentHighlight**, and **hover**,
   via `nimony check --def/--usages` (idetools), also run **over the live
