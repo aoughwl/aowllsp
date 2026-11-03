@@ -29,10 +29,10 @@ proc getEnvOr(name, dflt: string): string =
 
 proc defaultConfig*(): Config =
   Config(
-    nimonyExe: getEnvOr("NIMONY_EXE", "/home/savant/nimony/bin/nimony"),
-    aowlsuggestExe: getEnvOr("AOWLSUGGEST", "/home/savant/aowlsuggest/bin/aowlsuggest"),
-    aowllensExe: getEnvOr("AOWLLENS", "/home/savant/aowllens/bin/aowllens"),
-    aowlfmtExe: getEnvOr("AOWLFMT", "/home/savant/aowlfmt/bin/aowlfmt"),
+    nimonyExe: getEnvOr("NIMONY_EXE", "nimony"),
+    aowlsuggestExe: getEnvOr("AOWLSUGGEST", ""),
+    aowllensExe: getEnvOr("AOWLLENS", ""),
+    aowlfmtExe: getEnvOr("AOWLFMT", ""),
     extraPaths: @[],
     projectRoot: "",
     styleFlags: @[])
