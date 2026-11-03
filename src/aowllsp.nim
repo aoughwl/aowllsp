@@ -400,6 +400,13 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var version = 0
     parseDidOpen(tree.root, uri, langId, text, version)
     if uri.len > 0:
+      if s.config.projectRoot.len == 0:
+        # No workspace folder: a single file opened on its own, or `code
+        # file.nim`. The file's own directory becomes the root the per-module
+        # cache is keyed under. Without it every `nimcache/lsp` lookup resolves
+        # against the server's cwd, so the artifact the check just wrote is
+        # never found again and completion/symbols come back empty.
+        s.config.projectRoot = parentDirOf(uriToPath(uri))
       openDoc(s, uri, langId, version, text)
       publishFor(s, uriToPath(uri))
   of "textDocument/didChange":

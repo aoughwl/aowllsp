@@ -16,7 +16,7 @@ import state
 proc isAbsPath(p: string): bool =
   p.len > 0 and p[0] == '/'
 
-proc parentDirOf(p: string): string =
+proc parentDirOf*(p: string): string =
   var i = p.len - 1
   while i >= 0 and p[i] != '/': dec i
   if i <= 0: "/" else: substr(p, 0, i - 1)
