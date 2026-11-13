@@ -1,0 +1,437 @@
+## smoke.aowl -- drive bin/aowllsp.exe through one scripted JSON-RPC session
+## (Content-Length framed, exactly what an editor sends) and assert the answers.
+##
+##   smoke.exe <path to aowllsp.exe> <absolute work dir>
+##
+## The whole session is written to a file, fed to the server on stdin, and the
+## framed replies are read back whole -- no Python, no pipes, no timing. The
+## core group (lifecycle, diagnostics, definition, references, hover, folding,
+## selection, rename) needs only aowlmony. The groups that ride on the helper
+## CLIs run only when `aowllens` / `aowlsuggest` / `aowlfmt` sit next to the
+## server exe (or are named by AOWLLENS / AOWLSUGGEST / AOWLFMT) and print SKIP
+## otherwise, so the suite is honest about what it did not exercise.
+
+import std/[syncio, strutils, os, dirs, paths, envvars]
+import util, uris
+
+proc parseIntOr(s: string; dflt: int): int =
+  var v = 0
+  var any = false
+  for c in s:
+    if c >= '0' and c <= '9':
+      v = v * 10 + (ord(c) - ord('0'))
+      any = true
+  if any: v else: dflt
+
+var fails = 0
+var checks = 0
+
+proc check(cond: bool; msg: string) =
+  inc checks
+  if not cond:
+    inc fails
+    echo "FAIL: " & msg
+
+proc skip(what: string) =
+  echo "SKIP: " & what
+
+# ---------------------------------------------------------------------------
+# request building
+# ---------------------------------------------------------------------------
+
+var script: seq[string] = @[]
+
+proc frame(body: string): string =
+  "Content-Length: " & $body.len & "\r\n\r\n" & body
+
+proc sendReq(id: int; meth, params: string) =
+  script.add "{\"jsonrpc\":\"2.0\",\"id\":" & $id & ",\"method\":" & jStr(meth) &
+             ",\"params\":" & params & "}"
+
+proc sendNote(meth, params: string) =
+  script.add "{\"jsonrpc\":\"2.0\",\"method\":" & jStr(meth) & ",\"params\":" & params & "}"
+
+var work = ""
+
+proc uriOfFile(name: string): string = pathToUri(work & "/" & name)
+
+proc tdoc(name: string): string = "{\"uri\":" & jStr(uriOfFile(name)) & "}"
+
+proc openDoc(name, text: string) =
+  sendNote("textDocument/didOpen",
+    "{\"textDocument\":{\"uri\":" & jStr(uriOfFile(name)) &
+    ",\"languageId\":\"aowl\",\"version\":1,\"text\":" & jStr(text) & "}}")
+
+proc posReq(id: int; meth, name: string; line, ch: int) =
+  sendReq(id, meth, "{\"textDocument\":" & tdoc(name) &
+    ",\"position\":{\"line\":" & $line & ",\"character\":" & $ch & "}}")
+
+proc writeFixture(name, text: string) =
+  try:
+    writeFile(work & "/" & name, text)
+  except:
+    echo "cannot write fixture " & name
+    inc fails
+
+# ---------------------------------------------------------------------------
+# response reading
+# ---------------------------------------------------------------------------
+
+var msgs: seq[JsonValue] = @[]
+
+proc unframe(raw: string) =
+  var i = 0
+  while i < raw.len:
+    let h = find(raw, "\r\n\r\n", i)
+    if h < 0: break
+    let head = substr(raw, i, h - 1)
+    var cl = -1
+    for ln in splitLines(head):
+      let low = toLowerAscii(ln)
+      if startsWith(low, "content-length:"):
+        cl = parseIntOr(strip(substr(ln, 15, ln.len - 1)), -1)
+    if cl < 0: break
+    let body = substr(raw, h + 4, h + 3 + cl)
+    i = h + 4 + cl
+    let m = parseJsonOrNull(body)
+    if m != nil: msgs.add m
+
+proc resp(id: int): JsonValue =
+  ## The `result` of the response to request `id` (nil when absent / null).
+  result = nil
+  for m in msgs:
+    if m{"method"} == nil and m{"id"} != nil and jInt(m{"id"}, -1) == id:
+      return m{"result"}
+
+proc hasResponse(id: int): bool =
+  for m in msgs:
+    if m{"method"} == nil and m{"id"} != nil and jInt(m{"id"}, -1) == id: return true
+  return false
+
+proc diagsFor(name: string): seq[JsonValue] =
+  ## Every diagnostic published for `name`, over all publishDiagnostics.
+  result = @[]
+  let u = uriOfFile(name)
+  for m in msgs:
+    if getStr(m{"method"}) == "textDocument/publishDiagnostics" and
+       getStr(m{"params"}{"uri"}) == u:
+      for d in items(m{"params"}{"diagnostics"}): result.add d
+
+proc lastDiagCount(name: string): int =
+  ## Diagnostics in the LAST publish for `name` (-1 when never published).
+  result = -1
+  let u = uriOfFile(name)
+  for m in msgs:
+    if getStr(m{"method"}) == "textDocument/publishDiagnostics" and
+       getStr(m{"params"}{"uri"}) == u:
+      result = len(m{"params"}{"diagnostics"})
+
+proc startLine(n: JsonValue): int = jInt(n{"range"}{"start"}{"line"}, -1)
+
+proc labels(n: JsonValue): seq[string] =
+  result = @[]
+  for it in items(n{"items"}): result.add getStr(it{"label"})
+
+proc has(xs: seq[string]; s: string): bool =
+  for x in xs:
+    if x == s: return true
+  return false
+
+proc dump(n: JsonValue): string =
+  if n == nil: "null" else: $n
+
+proc toolNear(exe, envName, base: string): bool =
+  let e = envOr(envName, "")
+  if e.len > 0: return fileExists(e)
+  var i = exe.len - 1
+  while i >= 0 and exe[i] != '/': dec i
+  fileExists(substr(exe, 0, i) & base & ".exe")
+
+# ---------------------------------------------------------------------------
+# fixtures
+# ---------------------------------------------------------------------------
+
+const cleanSrc = "proc greet(name: string): string = \"hi \" & name\n\nlet x = greet(\"bob\")\nlet z = x\n"
+const badSrc = "let y: int = \"oops\"\n"
+const callsSrc = "proc leaf(x: int): int = x + 1\n\nproc mid(y: int): int = leaf(y) + leaf(y + 1)\n\nproc top(): int = mid(10)\n"
+const thSrc = "type\n  Animal = ref object of RootObj\n    name: string\n  Dog = ref object of Animal\n    breed: string\n  Cat = ref object of Animal\n    indoor: bool\n\nproc wag(d: Dog): bool = true\n\nproc handle(d: Dog) =\n  discard d.name\n"
+const chainSrc = "type\n  Inner = object\n    x: int\n    y: int\n  Outer = object\n    inner: Inner\n    tag: string\n\nproc f(o: Outer) =\n  discard o.inner.x\n"
+const incSrc = "type\n  Inner = object\n    x: int\n    y: int\n  Outer = object\n    inner: Inner\n\nproc f(o: Outer) =\n  discard o.inner.\n"
+const linkySrc = "import clean\nlet q = 1\n"
+const dirtySrc = "if x = 5:\n  discard\nif y = 6:\n  discard\n"
+const messySrc = "let a = 1   \n\n\n\nlet b = 2"
+const foldSrc = "proc a() =\n  discard 1\n  discard 2\n\nproc b() =\n  discard 3\n"
+
+proc main(): int =
+  let exe = slashes(paramStr(1))
+  work = normPath(paramStr(2))
+  try: createDir(path(work))
+  except: discard
+  let haveLens = toolNear(exe, "AOWLLENS", "aowllens")
+  let haveSuggest = toolNear(exe, "AOWLSUGGEST", "aowlsuggest")
+  let haveFmt = toolNear(exe, "AOWLFMT", "aowlfmt")
+
+  writeFixture("clean.aowl", cleanSrc)
+  writeFixture("bad.aowl", badSrc)
+  writeFixture("calls.aowl", callsSrc)
+  writeFixture("th.aowl", thSrc)
+  writeFixture("chain.aowl", chainSrc)
+  writeFixture("inc.aowl", incSrc)
+  writeFixture("linky.aowl", linkySrc)
+  writeFixture("fold.aowl", foldSrc)
+
+  # --- the session ----------------------------------------------------------
+  sendReq(1, "initialize", "{\"rootUri\":" & jStr(pathToUri(work)) &
+    ",\"capabilities\":{},\"initializationOptions\":{\"pedantic\":true}}")
+  sendNote("initialized", "{}")
+  openDoc("bad.aowl", badSrc)
+  openDoc("clean.aowl", cleanSrc)
+  openDoc("dirty.aowl", dirtySrc)
+  openDoc("linky.aowl", linkySrc)
+  openDoc("messy.aowl", messySrc)
+  openDoc("calls.aowl", callsSrc)
+  openDoc("th.aowl", thSrc)
+  openDoc("chain.aowl", chainSrc)
+  openDoc("inc.aowl", incSrc)
+  openDoc("fold.aowl", foldSrc)
+  posReq(2, "textDocument/definition", "clean.aowl", 2, 8)
+  posReq(3, "textDocument/hover", "clean.aowl", 2, 8)
+  sendReq(4, "textDocument/references", "{\"textDocument\":" & tdoc("clean.aowl") &
+    ",\"position\":{\"line\":0,\"character\":5},\"context\":{\"includeDeclaration\":true}}")
+  sendReq(5, "textDocument/documentSymbol", "{\"textDocument\":" & tdoc("clean.aowl") & "}")
+  posReq(6, "textDocument/completion", "clean.aowl", 2, 11)
+  sendReq(7, "textDocument/semanticTokens/full", "{\"textDocument\":" & tdoc("clean.aowl") & "}")
+  sendReq(8, "textDocument/rename", "{\"textDocument\":" & tdoc("clean.aowl") &
+    ",\"position\":{\"line\":0,\"character\":5},\"newName\":\"salute\"}")
+  posReq(10, "textDocument/signatureHelp", "clean.aowl", 2, 14)
+  sendReq(11, "textDocument/codeLens", "{\"textDocument\":" & tdoc("clean.aowl") & "}")
+  sendReq(12, "codeLens/resolve", "{\"range\":{\"start\":{\"line\":0,\"character\":5},\"end\":{\"line\":0,\"character\":10}},\"data\":{\"uri\":" &
+    jStr(uriOfFile("clean.aowl")) & ",\"line\":0,\"character\":5}}")
+  sendReq(13, "textDocument/documentLink", "{\"textDocument\":" & tdoc("linky.aowl") & "}")
+  sendReq(14, "textDocument/inlayHint", "{\"textDocument\":" & tdoc("clean.aowl") &
+    ",\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":4,\"character\":0}}}")
+  sendReq(15, "textDocument/formatting", "{\"textDocument\":" & tdoc("messy.aowl") &
+    ",\"options\":{\"tabSize\":2,\"insertSpaces\":true}}")
+  sendReq(20, "textDocument/rangeFormatting", "{\"textDocument\":" & tdoc("messy.aowl") &
+    ",\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":12}},\"options\":{\"tabSize\":2,\"insertSpaces\":true}}")
+  sendReq(16, "textDocument/diagnostic", "{\"textDocument\":" & tdoc("bad.aowl") & "}")
+  posReq(17, "textDocument/prepareCallHierarchy", "calls.aowl", 2, 5)
+  sendReq(18, "callHierarchy/incomingCalls", "{\"item\":{\"name\":\"mid\",\"kind\":12,\"uri\":" &
+    jStr(uriOfFile("calls.aowl")) & ",\"range\":{\"start\":{\"line\":2,\"character\":5},\"end\":{\"line\":2,\"character\":8}},\"selectionRange\":{\"start\":{\"line\":2,\"character\":5},\"end\":{\"line\":2,\"character\":8}},\"data\":{\"uri\":" &
+    jStr(uriOfFile("calls.aowl")) & ",\"line\":2,\"character\":5}}}")
+  sendReq(19, "callHierarchy/outgoingCalls", "{\"item\":{\"name\":\"mid\",\"kind\":12,\"uri\":" &
+    jStr(uriOfFile("calls.aowl")) & ",\"range\":{\"start\":{\"line\":2,\"character\":5},\"end\":{\"line\":2,\"character\":8}},\"selectionRange\":{\"start\":{\"line\":2,\"character\":5},\"end\":{\"line\":2,\"character\":8}},\"data\":{\"uri\":" &
+    jStr(uriOfFile("calls.aowl")) & ",\"line\":2,\"character\":5}}}")
+  posReq(21, "textDocument/prepareTypeHierarchy", "th.aowl", 3, 3)
+  sendReq(22, "typeHierarchy/supertypes", "{\"item\":{\"name\":\"Dog\",\"kind\":5,\"uri\":" &
+    jStr(uriOfFile("th.aowl")) & ",\"range\":{\"start\":{\"line\":3,\"character\":2},\"end\":{\"line\":3,\"character\":5}},\"selectionRange\":{\"start\":{\"line\":3,\"character\":2},\"end\":{\"line\":3,\"character\":5}},\"data\":{\"uri\":" &
+    jStr(uriOfFile("th.aowl")) & ",\"line\":3,\"character\":2}}}")
+  sendReq(23, "typeHierarchy/subtypes", "{\"item\":{\"name\":\"Animal\",\"kind\":5,\"uri\":" &
+    jStr(uriOfFile("th.aowl")) & ",\"range\":{\"start\":{\"line\":1,\"character\":2},\"end\":{\"line\":1,\"character\":8}},\"selectionRange\":{\"start\":{\"line\":1,\"character\":2},\"end\":{\"line\":1,\"character\":8}},\"data\":{\"uri\":" &
+    jStr(uriOfFile("th.aowl")) & ",\"line\":1,\"character\":2}}}")
+  sendReq(24, "textDocument/codeAction", "{\"textDocument\":" & tdoc("dirty.aowl") &
+    ",\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":3,\"character\":0}},\"context\":{\"diagnostics\":[],\"only\":[\"source.fixAll\"]}}")
+  sendReq(25, "textDocument/codeAction", "{\"textDocument\":" & tdoc("dirty.aowl") &
+    ",\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":9}},\"context\":{\"diagnostics\":[],\"only\":[\"quickfix\"]}}")
+  sendReq(26, "textDocument/codeAction", "{\"textDocument\":" & tdoc("messy.aowl") &
+    ",\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":4,\"character\":0}},\"context\":{\"diagnostics\":[],\"only\":[\"source.fixAll\"]}}")
+  posReq(27, "textDocument/completion", "th.aowl", 11, 12)
+  posReq(28, "textDocument/completion", "chain.aowl", 9, 18)
+  posReq(31, "textDocument/completion", "inc.aowl", 8, 18)
+  sendReq(32, "textDocument/foldingRange", "{\"textDocument\":" & tdoc("fold.aowl") & "}")
+  sendReq(33, "textDocument/selectionRange", "{\"textDocument\":" & tdoc("fold.aowl") &
+    ",\"positions\":[{\"line\":1,\"character\":9}]}")
+  posReq(34, "textDocument/documentHighlight", "clean.aowl", 0, 5)
+  posReq(35, "textDocument/prepareRename", "clean.aowl", 0, 5)
+  sendReq(36, "workspace/symbol", "{\"query\":\"greet\"}")
+  sendReq(37, "textDocument/someUnknownMethod", "{}")
+  # live edit: an open buffer is re-checked on change, fixing bad.aowl
+  sendNote("textDocument/didChange", "{\"textDocument\":{\"uri\":" & jStr(uriOfFile("bad.aowl")) &
+    ",\"version\":2},\"contentChanges\":[{\"text\":\"let y: int = 5\\n\"}]}")
+  sendNote("textDocument/didClose", "{\"textDocument\":" & tdoc("fold.aowl") & "}")
+  sendReq(9, "shutdown", "null")
+  sendNote("exit", "{}")
+
+  var input = ""
+  for m in script: input.add frame(m)
+  let run = runWithInput(exe, @[], input, work)
+  check(run.ok, "server ran and produced output")
+  unframe(run.output)
+  echo "session: " & $script.len & " messages sent, " & $msgs.len & " received"
+
+  # --- lifecycle ------------------------------------------------------------
+  let caps = resp(1){"capabilities"}
+  check(caps != nil, "initialize returns capabilities")
+  check(getBool(caps{"definitionProvider"}) and getBool(caps{"hoverProvider"}),
+        "initialize advertises definition + hover")
+  for cap in ["documentSymbolProvider", "completionProvider", "semanticTokensProvider",
+              "renameProvider", "codeActionProvider", "signatureHelpProvider",
+              "codeLensProvider", "documentLinkProvider", "inlayHintProvider",
+              "documentFormattingProvider", "documentRangeFormattingProvider",
+              "diagnosticProvider", "callHierarchyProvider", "typeHierarchyProvider",
+              "foldingRangeProvider", "selectionRangeProvider"]:
+    check(caps{cap} != nil, "capability " & cap & " advertised")
+  check(hasResponse(9), "shutdown answered")
+  check(hasResponse(37), "unknown request answered (null), not dropped")
+  check(getStr(resp(1){"serverInfo"}{"name"}) == "aowllsp", "serverInfo names aowllsp")
+
+  # --- diagnostics (aowlmony check) ------------------------------------------
+  let bd = diagsFor("bad.aowl")
+  check(bd.len > 0, "diagnostics published for bad.aowl")
+  var sawMismatch = false
+  for d in bd:
+    if find(getStr(d{"message"}), "type mismatch") >= 0 and jInt(d{"severity"}) == 1 and
+       jInt(d{"range"}{"start"}{"line"}, -1) == 0: sawMismatch = true
+  check(sawMismatch, "bad.aowl: type-mismatch error on line 0 with severity 1")
+  check(lastDiagCount("clean.aowl") == 0, "clean.aowl: published, and empty")
+  check(lastDiagCount("bad.aowl") == 0, "bad.aowl after the fix (didChange): last publish is empty")
+  let pd = resp(16)
+  check(getStr(pd{"kind"}) == "full" and len(pd{"items"}) >= 1,
+        "pull diagnostic: full report with the type error, got " & dump(pd))
+
+  # --- navigation (aowlmony check --def / --usages) ---------------------------
+  let df = resp(2)
+  check(len(df) == 1 and startLine(df.at(0)) == 0, "definition -> proc decl on line 0, got " & dump(df))
+  check(find(getStr(df.at(0){"uri"}), "clean.aowl") >= 0, "definition uri names clean.aowl")
+  let hv = resp(3)
+  check(find(dump(hv), "proc greet") >= 0, "hover shows the decl line, got " & dump(hv))
+  var refLines: seq[int] = @[]
+  for r in items(resp(4)): refLines.add startLine(r)
+  var l0 = false
+  var l2 = false
+  for l in refLines:
+    if l == 0: l0 = true
+    if l == 2: l2 = true
+  check(l0 and l2, "references include decl (0) and usage (2), got " & dump(resp(4)))
+  let hl = resp(34)
+  check(len(hl) >= 2, "documentHighlight finds decl + usage, got " & dump(hl))
+  check(jInt(resp(35){"end"}{"character"}, -1) == 10,
+        "prepareRename spans the word greet, got " & dump(resp(35)))
+  let rn = resp(8)
+  var edits = 0
+  for k, v in pairs(rn{"changes"}): edits += len(v)
+  check(edits >= 2, "rename produces >=2 edits, got " & $edits & " from " & dump(rn))
+
+  # --- text-only features -----------------------------------------------------
+  let fr = resp(32)
+  var foldOk = false
+  for f in items(fr):
+    if jInt(f{"startLine"}, -1) == 0 and jInt(f{"endLine"}, -1) >= 2: foldOk = true
+  check(foldOk, "foldingRange folds proc a (line 0..2), got " & dump(fr))
+  check(len(resp(33)) == 1, "selectionRange answers one range per position, got " & dump(resp(33)))
+  var linkOk = false
+  for l in items(resp(13)):
+    if find(getStr(l{"target"}), "clean.aowl") >= 0: linkOk = true
+  check(linkOk, "documentLink resolves `import clean`, got " & dump(resp(13)))
+  let sh = resp(10)
+  check(sh != nil and find(dump(sh), "greet") >= 0 and jInt(sh{"activeParameter"}, -1) == 0,
+        "signatureHelp shows greet, active param 0, got " & dump(sh))
+
+  # --- features that need aowllens ---------------------------------------------
+  if haveLens:
+    var sawGreet = false
+    for s in items(resp(5)):
+      if getStr(s{"name"}) == "greet": sawGreet = true
+    check(sawGreet, "documentSymbol includes greet, got " & dump(resp(5)))
+    var sawWs = false
+    for s in items(resp(36)):
+      if getStr(s{"name"}) == "greet": sawWs = true
+    check(sawWs, "workspace/symbol finds greet, got " & dump(resp(36)))
+    check(len(resp(6){"items"}) > 0, "completion returns items")
+    let st = resp(7)
+    check(len(st{"data"}) > 0 and len(st{"data"}) mod 5 == 0,
+          "semanticTokens data is a non-empty multiple of 5, got " & dump(st))
+    var lensOk = false
+    for l in items(resp(11)):
+      if l{"data"} != nil and startLine(l) == 0: lensOk = true
+    check(lensOk, "codeLens over the greet decl, got " & dump(resp(11)))
+    check(find(dump(resp(12){"command"}), "reference") >= 0,
+          "codeLens/resolve gives a reference count, got " & dump(resp(12)))
+    var inlayOk = false
+    for h in items(resp(14)):
+      if getStr(h{"label"}) == ": string" and jInt(h{"position"}{"line"}, -1) == 2: inlayOk = true
+    check(inlayOk, "inlayHint infers x: string, got " & dump(resp(14)))
+    let pc = resp(17)
+    check(len(pc) > 0 and getStr(pc.at(0){"name"}) == "mid", "prepareCallHierarchy -> mid, got " & dump(pc))
+    var inOk = false
+    for c in items(resp(18)):
+      if getStr(c{"from"}{"name"}) == "top": inOk = true
+    check(inOk, "incomingCalls: top calls mid, got " & dump(resp(18)))
+    var outOk = false
+    for c in items(resp(19)):
+      if getStr(c{"to"}{"name"}) == "leaf" and len(c{"fromRanges"}) == 2: outOk = true
+    check(outOk, "outgoingCalls: mid calls leaf x2, got " & dump(resp(19)))
+    let ph = resp(21)
+    check(len(ph) > 0 and getStr(ph.at(0){"name"}) == "Dog", "prepareTypeHierarchy -> Dog, got " & dump(ph))
+    var supOk = false
+    for t in items(resp(22)):
+      if getStr(t{"name"}) == "Animal": supOk = true
+    check(supOk, "supertypes(Dog) = Animal, got " & dump(resp(22)))
+    var dog = false
+    var cat = false
+    for t in items(resp(23)):
+      if getStr(t{"name"}) == "Dog": dog = true
+      if getStr(t{"name"}) == "Cat": cat = true
+    check(dog and cat, "subtypes(Animal) = Dog + Cat, got " & dump(resp(23)))
+    let mc = labels(resp(27))
+    check(has(mc, "breed") and has(mc, "name") and has(mc, "wag"),
+          "member completion offers own + inherited + UFCS members")
+    check(not has(mc, "Cat") and not has(mc, "Animal"), "member completion is type-directed")
+    let cc = labels(resp(28))
+    check(has(cc, "x") and has(cc, "y") and not has(cc, "inner") and not has(cc, "tag"),
+          "field-chain completion resolves through o.inner")
+    let ic = labels(resp(31))
+    check(has(ic, "x") and has(ic, "y") and not has(ic, "tag"),
+          "incomplete-buffer completion resolves via massage")
+  else:
+    skip("aowllens not found next to the server: symbols, tokens, completion, hierarchy, hints, lens")
+    check(hasResponse(5) and hasResponse(7) and hasResponse(6) and hasResponse(17),
+          "lens-backed requests still answer (degraded) without aowllens")
+
+  # --- features that need aowlsuggest ------------------------------------------
+  if haveSuggest:
+    var synLines: seq[int] = @[]
+    var codeOk = false
+    for d in diagsFor("dirty.aowl"):
+      if getStr(d{"source"}) == "aowlsuggest":
+        synLines.add jInt(d{"range"}{"start"}{"line"}, -1)
+        if getStr(d{"code"}) == "assignment-in-condition": codeOk = true
+    var s0 = false
+    var s2 = false
+    for l in synLines:
+      if l == 0: s0 = true
+      if l == 2: s2 = true
+    check(s0 and s2, "aowlsuggest recovers both syntax errors in dirty.aowl")
+    check(codeOk, "syntax diagnostic carries code=assignment-in-condition")
+    var trailing = false
+    for d in diagsFor("messy.aowl"):
+      if getStr(d{"source"}) == "aowlsuggest" and getStr(d{"code"}) == "trailing-whitespace":
+        trailing = true
+    check(trailing, "pedantic surfaces trailing-whitespace on messy.aowl")
+    let fa = resp(24)
+    var faText = ""
+    if len(fa) == 1 and getStr(fa.at(0){"kind"}) == "source.fixAll":
+      for k, v in pairs(fa.at(0){"edit"}{"changes"}):
+        faText = getStr(v.at(0){"newText"})
+    check(find(faText, "if x == 5") >= 0 and find(faText, "if y == 6") >= 0,
+          "source.fixAll applies the verified repairs, got " & dump(fa))
+    var qfAll = false
+    for a in items(resp(25)):
+      if getStr(a{"kind"}) == "source.fixAll": qfAll = true
+    check(not qfAll, "quickfix-only request excludes source.fixAll")
+  else:
+    skip("aowlsuggest not found next to the server: syntax diagnostics, quickfix, fixAll")
+
+  # --- features that need aowlfmt -----------------------------------------------
+  if haveFmt:
+    let fm = resp(15)
+    check(len(fm) == 1 and getStr(fm.at(0){"newText"}) == "let a = 1\n\nlet b = 2\n",
+          "formatting returns the normalised whole-document edit, got " & dump(fm))
+  else:
+    skip("aowlfmt not found next to the server: formatting, rangeFormatting")
+
+  echo "smoke: " & $checks & " checks, " & $fails & " failed"
+  if fails == 0: echo "smoke: PASS"
+  result = if fails == 0: 0 else: 1
+
+quit main()

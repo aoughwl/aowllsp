@@ -1,121 +1,88 @@
 # aowllsp
 
-A **Language Server for Nimony, written in Nimony.** A ground-up nimony rewrite
-of the (Nim 2) `nimony-lsp`, so the whole editor stack is self-owned and — the
-end goal — JS-compilable for an in-browser IDE.
+A **Language Server for aowlmony, written in aowlmony.** Its only hard runtime
+dependency is the `aowlmony` binary; three optional helper CLIs
+(`aowllens`, `aowlsuggest`, `aowlfmt`) switch on the richer features and are
+found next to the server exe (or via `AOWLLENS` / `AOWLSUGGEST` / `AOWLFMT`).
+A missing helper turns its features off silently -- it never crashes the server.
 
-> Status: **broad feature coverage.** ~36 LSP methods handled. Navigation and
-> diagnostics run via the `nimony` subprocess; the symbol/token features read NIF
-> artifacts through the nimony-native [aowllens](https://github.com/aoughwl/aowllens).
-> A future browser build swaps both for in-process calls (see the seam below).
+Windows is the target platform; every path inside the server is `/`-separated
+with an upper-case drive letter, and `file:///c%3A/x` and `file:///C:/x` are the
+same buffer.
 
-## What works today
+## What works
 
-- **LSP lifecycle** — `initialize` (advertising every capability below),
-  `shutdown` / `exit`.
-- **Document sync** — `didOpen` / `didChange` (full sync) / `didSave` /
-  `didClose`, with UTF-8 ↔ UTF-16 position mapping (LSP columns are UTF-16).
-- **Diagnostics** — semantic errors from `nimony check` **over the live,
-  unsaved buffer** (materialized to a sibling temp file, checked, paths mapped
-  back), grouped by URI, `Trace` lines as `relatedInformation`, **plus**
-  recovering *syntax* diagnostics from
-  [aowlsuggest](https://github.com/aoughwl/aowlsuggest) over the same buffer —
-  so both semantic and syntax errors reflect what you're typing. Each
-  aowlsuggest diagnostic carries its rule id in LSP's `code` field (so editors
-  can show/filter by it) plus a `codeDescription` rule link.
-- **Navigation** — go to **definition**, **declaration**, **typeDefinition**,
-  **implementation**, find **references**, **documentHighlight**, and **hover**,
-  via `nimony check --def/--usages` (idetools), also run **over the live
-  buffer** so a symbol you just typed resolves before you save.
-- **Symbols** — **documentSymbol** and **workspaceSymbol**, from `aowllens decls`.
-- **completion** — module symbols filtered by the identifier prefix under the
-  cursor (via `aowllens decls`/`index`).
-- **codeAction** — quick-fixes delegated to `aowlsuggest` (its recovering-syntax
-  fixes with "did you mean" alternatives), **plus a `source.fixAll` action** that
-  applies *every* verified auto-fix in the buffer at once (syntax repairs and any
-  opt-in style fixes) as a single whole-document edit — ideal for
-  `editor.codeActionsOnSave`. The server honours the request's `context.only`, so
-  a quickfix-only request skips the fix-all pass.
-- **semanticTokens/full** — declaration-site highlighting from `aowllens decls`.
-- **rename** / **prepareRename** — WorkspaceEdit across every reference.
-- **signatureHelp** — the callee's declaration line with its parameters split
-  out and the active one selected (reuses goto-definition; no new type info).
-- **codeLens** — a "N references" lens over every top-level routine/type; the
-  count is computed lazily in **codeLens/resolve**, so opening a file is cheap.
-- **documentLink** — `import` / `include` / `from` module names linked to the
-  file they resolve to on disk.
-- **inlayHint** — inferred `: type` hints on un-annotated `let` / `var` /
-  `const` bindings, read from the sem'd artifact via `aowllens render` (the
-  inferred type is real, not guessed; annotated bindings are left alone).
-- **formatting** — whole-document layout formatting delegated to
-  [aowlfmt](https://github.com/aoughwl/aowlfmt), which proves each reformat
-  preserves program structure before returning it (so the edit can't corrupt
-  the buffer).
-- **pull diagnostics** (`textDocument/diagnostic`) — the LSP 3.17 pull model:
-  the same semantic + recovering-syntax diagnostics, returned on request.
-- **call hierarchy** — `prepareCallHierarchy` + **incomingCalls** (who calls
-  this) and **outgoingCalls** (what this calls), read from the sem'd artifact's
-  call edges via [aowllens](https://github.com/aoughwl/aowllens) `calls`.
-- **type hierarchy** — `prepareTypeHierarchy` + **supertypes** and **subtypes**,
-  read from the artifact's `object of` inheritance edges via `aowllens types`.
-- **range formatting** (`textDocument/rangeFormatting`) — formats only the
-  selected lines, delegated to `aowlfmt --range` (still gate-verified).
-- **initializationOptions** — the editor can override the tool paths
-  (`nimonyExe` / `aowlsuggestExe` / `aowllensExe` / `aowlfmtExe`) and
-  `extraPaths` per workspace; anything omitted keeps its env/default. Opt in to
-  aowlsuggest's stylistic lint with `"pedantic": true` (trailing-whitespace +
-  final-newline + BOM) or `"style": ["trailing-whitespace", "lf", …]` — the
-  matching diagnostics then appear live and feed both the quick-fix and
-  `source.fixAll` actions. A repo that commits a
-  [`.aowlsuggest`](https://github.com/aoughwl/aowlsuggest#project-config--aowlsuggest)
-  config is honoured **automatically** — aowllsp passes each buffer's real path
-  as `--filename`, and aowlsuggest anchors config discovery there, so a project's
-  style policy flows into the editor with no `initializationOptions` at all.
-- **foldingRange** and **selectionRange** — indentation/word heuristics.
-- **cache pruning** — the per-module nimcache pool is bounded (LRU eviction on
-  `didClose`), so it can't grow without limit.
+Verified by `tests/smoke.sh` (one scripted, Content-Length framed session against
+the real exe; 60 checks when all three helpers are present):
 
-## Architecture — the subprocess seam
+| group | methods | needs |
+|-------|---------|-------|
+| lifecycle | `initialize` (+ capabilities, `initializationOptions`), `initialized`, `shutdown`, `exit`, unknown requests answered `null` | -- |
+| document sync | `didOpen` / `didChange` (full) / `didSave` / `didClose`, UTF-16 <-> byte columns | -- |
+| diagnostics | push (`publishDiagnostics`) and pull (`textDocument/diagnostic`) from `aowlmony check` over the **live, unsaved buffer**; `Trace` lines become `relatedInformation` | aowlmony |
+| navigation | `definition`, `declaration`, `typeDefinition`, `implementation`, `references`, `documentHighlight`, `hover`, `prepareRename` / `rename`, `signatureHelp` via `aowlmony check --def/--usages` | aowlmony |
+| text-only | `foldingRange`, `selectionRange`, `documentLink` | -- |
+| symbols and tokens | `documentSymbol`, `workspace/symbol`, `semanticTokens/full`, `completion` (plain and type-directed member completion), `codeLens` + resolve, `inlayHint`, call hierarchy, type hierarchy | aowllens |
+| syntax diagnostics, code actions | recovering syntax errors over the live buffer (rule id in `code`), `quickfix`, `source.fixAll` | aowlsuggest |
+| formatting | `formatting`, `rangeFormatting` | aowlfmt |
 
-Everything semantic goes through one module, `src/driver.nim`, which runs the
-`nimony` binary and captures its output. Each open file is checked as its own
-main module into an **isolated per-module nimcache** (`nimcache/lsp/<mangled>/`),
-so a file stays warm after one cold compile instead of thrashing a shared cache.
+Degraded without a helper: its methods answer an empty result (`[]` / `null`).
+`aowlfmt` has no aowlmony port yet, so formatting is currently off unless you
+point `AOWLFMT` at one.
 
-That seam is deliberate: a future **browser** build swaps `driver.run` for
-in-process `aowlparser` / `aowlsem` calls (no subprocess), and the drivers above
-it don't change. Diagnostics can also be sourced from
-[aowlsuggest](https://github.com/aoughwl/aowlsuggest) — the recovering parser
-reports *every* syntax error with quick-fixes, where `nimony check` aborts on the
-first.
+`initializationOptions`: `aowlmonyExe`, `aowlsuggestExe`, `aowllensExe`,
+`aowlfmtExe`, `extraPaths`, `pedantic` (aowlsuggest's safe style set) and
+`style` (per-category opt-in).
 
-## Shared libraries
+## Architecture -- the subprocess seam
 
-- **[aowlkit](https://github.com/aoughwl/aowlkit)** — JSON building, safe
-  subprocess capture, temp paths. Consumed via `-p:`; also used by aowlsuggest.
-- **[aowlfmt](https://github.com/aoughwl/aowlfmt)** — the verified layout
-  formatter; `formatting` pipes the buffer through it (`aowlfmt --stdin`).
-- **aowlhl** — the nimony-native NIF reader that Phase-2 in-process nav will link.
+Everything semantic goes through `src/driver.aowl`, which runs `aowlmony` and
+captures its output whole (via a temp file; pipes mangle long single-line JSON).
+Each open file is checked as its own main module into an isolated cache under
+`<projectRoot>/.aowllsp/cache/<mangled>/`. Tracked queries (`--def` / `--usages`)
+and live-buffer checks get their own sibling caches (`-nav`, `-live`,
+`-livenav`): the compiler invalidates the whole sem step when the command line
+changes, so mixing them in one cache makes every request cold (~5 s instead of
+~0.5 s). The pool is bounded (LRU eviction on `didClose`).
+
+That seam is deliberate: a browser build swaps `driver.run` for in-process
+parser/sem calls and the modules above it do not change.
+
+JSON: reading uses `jsonref`; writing is hand-built text (`src/util.aowl`:
+`jStr`, `jBool`, `jArr`). `util.aowl` also holds the whole-output subprocess
+capture and temp paths -- it replaces the retired `aowlkit` library, so there is
+no dependency on it.
 
 ## Layout
 
 | file | role |
 |------|------|
-| `src/aowllsp.nim` | entry: message loop, lifecycle, dispatch |
-| `src/framing.nim` | Content-Length framed stdio transport |
-| `src/protocol.nim` | LSP value types + JSON serialization |
-| `src/document.nim` | text buffer + UTF-16 ↔ byte mapping |
-| `src/state.nim` | config + open-document registry |
-| `src/uris.nim` | `file://` URI ↔ path |
-| `src/driver.nim` | the `nimony` subprocess seam (per-module nimcache) |
-| `src/diagnostics.nim` | parse `nimony check` output |
-| `src/idetools.nim` | parse `--def` / `--usages` records |
+| `src/aowllsp.aowl` | entry: message loop, lifecycle, dispatch |
+| `src/framing.aowl` | Content-Length framed stdio transport (binary-mode stdio on Windows) |
+| `src/protocol.aowl` | LSP value types + JSON serialization |
+| `src/document.aowl` | text buffer + UTF-16 <-> byte mapping |
+| `src/state.aowl` | config, tool discovery, open-document registry |
+| `src/uris.aowl` | `file://` URI <-> path (Windows drive letters) |
+| `src/util.aowl` | JSON text builders, subprocess capture, temp paths |
+| `src/driver.aowl` | the `aowlmony` subprocess seam (per-module caches) |
+| `src/diagnostics.aowl` | parse `aowlmony check` output |
+| `src/idetools.aowl` | parse `--def` / `--usages` records |
+| `src/syntaxdiag.aowl`, `src/codeactions.aowl` | `aowlsuggest` adapters |
+| `src/symbols.aowl`, `src/semtokens.aowl`, `src/completion.aowl`, `src/typeinfo.aowl`, `src/callhier.aowl`, `src/typehier.aowl` | `aowllens` adapters |
+| `src/formatting.aowl` | `aowlfmt` adapter |
+| `src/hints.aowl`, `src/renamehl.aowl`, `src/structure.aowl` | signature help / lenses / links, rename + highlight, folding + selection |
 
-## Build
+## Build and test
 
 ```sh
-bash build.sh          # -> bin/aowllsp   (needs $HOME/aowlkit; NIMONY overrides the compiler)
-bash tests/smoke.sh    # scripted JSON-RPC session
+bash build.sh          # -> bin/aowllsp.exe   (aowlmony only; fails loudly if no exe)
+bash tests/smoke.sh    # builds the aowlmony test client and runs one scripted session
 ```
 
-Point your editor's LSP client at `bin/aowllsp` for `.nim` / `.aowl` files.
+`build.sh` runs `aowlmony.exe c -d:release --path:<jsonref> --path:src aowllsp.aowl`
+with `AOWLMONY_ROOT` set (defaults: `~/dev/toolchain/aowlmony/root`,
+`~/dev/jsonref/src`; override with `AOWLMONY_ROOT` / `AOWLJSONREF`). To enable the
+optional features, copy `aowllens.exe` / `aowlsuggest.exe` / `aowlfmt.exe` into
+`bin/`.
+
+Point your editor's LSP client at `bin/aowllsp.exe` for `.aowl` files.
