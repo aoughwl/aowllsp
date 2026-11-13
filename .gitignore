@@ -1,4 +1,6 @@
 /bin/
 /nimcache/
+/src/nimcache/
+/tests/nimcache/
 /tests/_work/
-__pycache__/
+.aowllsp/

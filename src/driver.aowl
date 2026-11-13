@@ -1,29 +1,26 @@
-## driver.nim — the subprocess seam to the `nimony` compiler.
+## driver.aowl — the subprocess seam to the `aowlmony` compiler.
 ##
-## Everything the LSP knows semantically comes through here today: `nimony check`
-## for diagnostics, `nimony check --def/--usages` (idetools) for navigation. Each
+## Everything the LSP knows semantically comes through here today: `aowlmony check`
+## for diagnostics, `aowlmony check --def/--usages` (idetools) for navigation. Each
 ## open file is checked as its OWN main module into an ISOLATED per-module
-## nimcache under `nimcache/lsp/<mangled>/`, so a file stays warm (~ms) after one
+## cache under `.aowllsp/cache/<mangled>/`, so a file stays warm (~ms) after one
 ## cold compile instead of thrashing a shared cache.
 ##
 ## This is the seam a future browser build swaps for in-process aowlparser/
 ## aowlsem calls — the drivers above it only see `run`.
 
 import std/[strutils, os, dirs, paths, syncio]
-import aowlkit/subprocess
-import state
-
-proc isAbsPath(p: string): bool =
-  p.len > 0 and p[0] == '/'
+import util
+import uris, state
 
 proc parentDirOf(p: string): string =
   var i = p.len - 1
   while i >= 0 and p[i] != '/': dec i
-  if i <= 0: "/" else: substr(p, 0, i - 1)
+  if i < 0: "." elif i == 0: "/" elif i == 2 and hasDrive(p): substr(p, 0, 2) else: substr(p, 0, i - 1)
 
 proc canonFile*(cfg: Config; file: string): string =
-  ## The path form handed to nimony: RELATIVE to projectRoot when the file lives
-  ## under it (nimony keys its incremental cache by the path string as given, so
+  ## The path form handed to aowlmony: RELATIVE to projectRoot when the file lives
+  ## under it (aowlmony keys its incremental cache by the path string as given, so
   ## every caller must use one consistent form to share a warm cache).
   if cfg.projectRoot.len > 0 and isAbsPath(file):
     let root = cfg.projectRoot & (if cfg.projectRoot[cfg.projectRoot.len-1] == '/': "" else: "/")
@@ -42,14 +39,14 @@ proc mangle(s: string): string =
 
 proc cacheRoot(cfg: Config): string =
   let root = if cfg.projectRoot.len > 0: cfg.projectRoot else: "."
-  root & "/nimcache/lsp"
+  root & "/.aowllsp/cache"
 
 proc moduleCacheDir*(cfg: Config; canonName: string): string =
   cacheRoot(cfg) & "/" & mangle(canonName)
 
 proc moduleArtifacts*(cfg: Config; file, ext: string): seq[string] =
   ## Every artifact matching `ext` (e.g. ".s.nif", ".s.idx.nif") in the file's
-  ## per-module nimcache. Empty when nothing has been checked yet.
+  ## per-module cache. Empty when nothing has been checked yet.
   result = @[]
   let dir = moduleCacheDir(cfg, canonFile(cfg, file))
   if not dirExists(dir): return
@@ -75,16 +72,16 @@ proc mainArtifact*(cfg: Config; file, ext: string): string =
 
 proc liveArtifact*(cfg: Config; file, bufferText, ext: string): string =
   ## Compile the (possibly massaged) live `bufferText` and return the freshest
-  ## matching artifact from the ISOLATED `-live` nimcache — the snif for the
+  ## matching artifact from the ISOLATED `-live` cache — the snif for the
   ## in-flight buffer, not the last-saved file. "" if the compile produced none.
   ## Used by completion so a member query reflects unsaved edits.
   # NB: pass `track` EXPLICITLY (not via its default) — calling through the
-  # defaulted `seq[string]=@[]` param trips a nimony hexer bug (isTrivial at
-  # decls.nim:46) during this module's build.
+  # defaulted `seq[string]=@[]` param trips a aowlmony hexer bug (isTrivial at
+  # decls.aowl:46) during this module's build.
   discard runLiveCheck(cfg, file, bufferText, @[])
   let dir = moduleCacheDir(cfg, canonFile(cfg, file)) & "-live"
   if not dirExists(dir): return ""
-  # nimony names artifacts by its own scheme, not the temp basename; the module
+  # the compiler names artifacts by its own scheme, not the temp basename; the module
   # under compilation is written last, so the NEWEST matching artifact is ours —
   # the same heuristic `mainArtifact` uses for the on-disk cache.
   result = ""
@@ -103,7 +100,7 @@ proc liveArtifact*(cfg: Config; file, bufferText, ext: string): string =
     discard
 
 proc pruneCaches*(cfg: Config; budgetBytes = 1_000_000_000) =
-  ## Bound the nimcache/lsp pool: if it exceeds `budgetBytes`, evict whole
+  ## Bound the .aowllsp/cache pool: if it exceeds `budgetBytes`, evict whole
   ## per-module cache dirs oldest-first (by mtime) until back under budget.
   ## Prevents the per-module caches from growing without limit.
   let base = cacheRoot(cfg)
@@ -151,11 +148,15 @@ proc pruneCaches*(cfg: Config; budgetBytes = 1_000_000_000) =
     discard
 
 proc run*(cfg: Config; sub, file: string; track: seq[string] = @[]): CaptureResult =
-  ## Run `nimony <sub> --nimcache:<per-module> [--path ..] [track ..] <file>`.
-  if cfg.nimonyExe.len == 0:
+  ## Run `aowlmony <sub> --nimcache:<per-module> [--path ..] [track ..] <file>`.
+  if cfg.aowlmonyExe.len == 0:
     return CaptureResult(output: "", exitCode: 127, ok: false)
   let cf = canonFile(cfg, file)
-  var args: seq[string] = @[sub, "--nimcache:" & moduleCacheDir(cfg, cf)]
+  # Tracked (--def/--usages) queries get their OWN cache dir: the compiler
+  # invalidates the whole sem step when the command line changes, so mixing
+  # plain checks and queries in one dir makes every call cold (~5s vs ~0.5s).
+  let cdir = moduleCacheDir(cfg, cf) & (if track.len > 0: "-nav" else: "")
+  var args: seq[string] = @[sub, "--nimcache:" & cdir]
   for i in 0 ..< cfg.extraPaths.len:
     args.add "--path:" & cfg.extraPaths[i]
   for i in 0 ..< track.len:
@@ -164,22 +165,22 @@ proc run*(cfg: Config; sub, file: string; track: seq[string] = @[]): CaptureResu
   let workdir =
     if cfg.projectRoot.len > 0: cfg.projectRoot
     else: parentDirOf(file)
-  result = runCaptured(cfg.nimonyExe, args, workdir, true)
+  result = runCaptured(cfg.aowlmonyExe, args, workdir, true)
 
 proc runLiveCheck*(cfg: Config; file, bufferText: string;
                    track: seq[string] = @[]): CaptureResult =
   ## Check the UNSAVED buffer, not the on-disk file: write `bufferText` to a
   ## sibling temp file (same directory, so relative imports resolve), check it
-  ## into an ISOLATED live nimcache, then map the temp path back to the real
+  ## into an ISOLATED live cache, then map the temp path back to the real
   ## file in the output so diagnostics/records point at the user's file. This is
   ## what makes semantic diagnostics and navigation reflect in-flight edits.
-  if cfg.nimonyExe.len == 0:
+  if cfg.aowlmonyExe.len == 0:
     return CaptureResult(output: "", exitCode: 127, ok: false)
   let dir = parentDirOf(file)
   let cf = canonFile(cfg, file)
-  # NB: no leading dot — nimony derives the module name from the filename and a
+  # NB: no leading dot — the compiler derives the module name from the filename and a
   # dot-prefixed name yields an empty module name (nifreader assertion crash).
-  let tempAbs = dir & "/aowllsp_live_" & mangle(cf) & ".nim"
+  let tempAbs = dir & "/aowllsp_live_" & mangle(cf) & ".aowl"
   var wrote = false
   try:
     writeFile(tempAbs, bufferText); wrote = true
@@ -187,7 +188,8 @@ proc runLiveCheck*(cfg: Config; file, bufferText: string;
     # can't write next to the file — fall back to the on-disk check
     return run(cfg, "check", file, track)
   let tempRel = canonFile(cfg, tempAbs)
-  var args: seq[string] = @["check", "--nimcache:" & moduleCacheDir(cfg, cf) & "-live"]
+  let ldir = moduleCacheDir(cfg, cf) & (if track.len > 0: "-livenav" else: "-live")
+  var args: seq[string] = @["check", "--nimcache:" & ldir]
   for i in 0 ..< cfg.extraPaths.len:
     args.add "--path:" & cfg.extraPaths[i]
   # a --def/--usages track names the file by `cf`; the compiled module is the
@@ -196,9 +198,49 @@ proc runLiveCheck*(cfg: Config; file, bufferText: string;
     args.add replace(track[i], cf, tempRel)
   args.add tempRel
   let workdir = if cfg.projectRoot.len > 0: cfg.projectRoot else: dir
-  result = runCaptured(cfg.nimonyExe, args, workdir, true)
+  result = runCaptured(cfg.aowlmonyExe, args, workdir, true)
   # map the temp path back to the real file (tempRel is unique in the output)
   result.output = replace(result.output, tempRel, cf)
   if wrote:
     try: removeFile(path(tempAbs))
     except: discard
+
+proc baseOfPath(p: string): string =
+  var i = p.len - 1
+  while i >= 0 and p[i] != '/' and p[i] != '\\': dec i
+  substr(p, i + 1, p.len - 1)
+
+proc cacheSnifs*(cfg: Config; limit = 64): seq[string] =
+  ## One `*.s.nif` per distinct module across the per-module caches (the
+  ## compiler names a module's artifact by a hash of its path, so the same
+  ## imported module appears under the same file name in every cache -- reading
+  ## it once is enough). The `-live` / `-nav` / `-livenav` scratch caches are
+  ## skipped. Bounded by `limit` because each one costs a helper-CLI spawn.
+  result = @[]
+  let base = cacheRoot(cfg)
+  if not dirExists(base): return
+  var seenNames: seq[string] = @[]
+  try:
+    for kind, p in walkDir(path(base)):
+      if kind != pcDir: continue
+      let d = $p
+      if endsWith(d, "-live") or endsWith(d, "-nav") or endsWith(d, "-livenav"): continue
+      try:
+        for k2, f in walkDir(path(d)):
+          if k2 != pcFile: continue
+          let fs = slashes($f)
+          if not endsWith(fs, ".s.nif") or endsWith(fs, ".s.idx.nif"): continue
+          let b = baseOfPath(fs)
+          var dup = false
+          for s in seenNames:
+            if s == b: dup = true
+          if dup: continue
+          seenNames.add b
+          result.add fs
+      except:
+        discard
+  except:
+    discard
+  # NB: no early `return` inside the nested walkDir loops -- the C backend then
+  # emits two definitions of the same tryCloseDir temporary and cc rejects it.
+  if result.len > limit: result.setLen(limit)

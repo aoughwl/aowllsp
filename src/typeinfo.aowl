@@ -1,6 +1,6 @@
-## typeinfo.nim — inlay type hints, powered by `aowllens render`.
+## typeinfo.aowl — inlay type hints, powered by `aowllens render`.
 ##
-## nimony's sem'd NIF artifact carries the *inferred* type of every binding, and
+## aowlmony's sem'd NIF artifact carries the *inferred* type of every binding, and
 ## `aowllens render` prints it back as source: a bare `let x = greet("bob")`
 ## renders as `let x: string = greet("bob")`. We diff that against the actual
 ## source line — when the user wrote no annotation, we surface the inferred type
@@ -8,10 +8,9 @@
 ##
 ## Everything is derived from the existing render seam; no new NIF reading.
 
-import std/[strutils, syncio, json]
+import std/[strutils, syncio]
 import protocol, state, driver, symbols
-import aowlkit/json as ajson
-import aowlkit/subprocess
+import util
 
 type RenderRec = object
   name: string
@@ -24,18 +23,13 @@ proc runRender(cfg: Config; snif: string): seq[RenderRec] =
   if cfg.aowllensExe.len == 0 or snif.len == 0: return
   let cap = runCaptured(cfg.aowllensExe, @["render", snif], "", false)
   if not cap.ok or cap.output.len == 0: return
-  var tree = default(JsonTree)
-  try:
-    tree = parseJson(cap.output)
-  except:
-    return
-  let root = tree.root
-  if root.kind != JObject: return
+  let root = parseJsonOrNull(cap.output)
+  if kindOf(root) != jnObject: return
   for k, v in pairs(root):
     if k != "nodes": continue
-    if v.kind != JArray: continue
+    if kindOf(v) != jnArray: continue
     for el in items(v):
-      if el.kind != JObject: continue
+      if kindOf(el) != jnObject: continue
       var rec = RenderRec(name: "", kind: "", render: "")
       for kk, vv in pairs(el):
         case kk
@@ -145,7 +139,7 @@ proc inlayHintsJson*(cfg: Config; file, bufferText: string): string =
     # place the hint right after the variable name
     let charPos = d.col + d.name.len
     parts.add "{\"position\":{\"line\":" & $d.line & ",\"character\":" &
-      $charPos & "},\"label\":" & ajson.jStr(": " & ty) &
+      $charPos & "},\"label\":" & jStr(": " & ty) &
       ",\"kind\":1,\"paddingLeft\":false,\"paddingRight\":false}"
   result = "["
   for i in 0 ..< parts.len:

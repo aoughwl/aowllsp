@@ -1,8 +1,8 @@
-## protocol.nim — the LSP value types we use, plus their JSON serialization.
+## protocol.aowl — the LSP value types we use, plus their JSON serialization.
 ## Positions are 0-based; `character` is a UTF-16 code-unit offset (LSP's rule),
-## which `document.nim` maps to/from UTF-8 byte offsets.
+## which `document.aowl` maps to/from UTF-8 byte offsets.
 
-import aowlkit/json
+import util
 
 type
   Position* = object
@@ -11,7 +11,7 @@ type
 
   Range* = object
     start*: Position
-    stop*: Position        ## `end` in LSP; `end` is a nimony keyword
+    stop*: Position        ## `end` in LSP; `end` is a aowlmony keyword
 
   Location* = object
     uri*: string

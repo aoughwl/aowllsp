@@ -1,7 +1,18 @@
-## framing.nim — LSP base-protocol transport: Content-Length framed messages
+## framing.aowl — LSP base-protocol transport: Content-Length framed messages
 ## over stdin/stdout.
 
 import std/syncio
+
+when defined(windows):
+  proc c_setmode(fd: cint; mode: cint): cint {.importc: "_setmode", header: "<io.h>".}
+
+proc setBinaryStdio*() =
+  ## The C runtime opens stdin/stdout in TEXT mode on Windows: it expands every
+  ## LF to CRLF on write (corrupting each Content-Length frame) and collapses
+  ## CRLF on read. LSP framing is bytes, so switch both to binary (_O_BINARY).
+  when defined(windows):
+    discard c_setmode(0, 0x8000)
+    discard c_setmode(1, 0x8000)
 
 proc parseIntSafe(s: string): int =
   var v = 0

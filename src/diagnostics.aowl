@@ -1,4 +1,4 @@
-## diagnostics.nim — parse `nimony check` output into LSP diagnostics.
+## diagnostics.aowl — parse `aowlmony check` output into LSP diagnostics.
 ##
 ## Line format (line/col 1-based; col is a UTF-8 byte/codepoint):
 ##   path(line, col) Error: message
@@ -32,9 +32,10 @@ proc severityOf(kind: string): DiagnosticSeverity =
   else: dsInformation
 
 proc absPathOf(cfg: Config; p: string): string =
-  if p.len > 0 and p[0] == '/': return p
+  let q = normPath(p)
+  if isAbsPath(q): return q
   let root = if cfg.projectRoot.len > 0: cfg.projectRoot else: "."
-  result = root & "/" & p
+  result = root & "/" & q
 
 proc knownKind(k: string): bool =
   k == "Error" or k == "Warning" or k == "Trace" or k == "Hint" or k == "Info"
@@ -83,7 +84,7 @@ proc parseDiagnostics*(cfg: Config; raw: string): seq[FileDiag] =
       fd.diag.related.add RelatedInfo(uri: pathToUri(key), rng: rng, message: msg)
       result[lastIdx] = fd
       continue
-    var d = Diagnostic(rng: rng, severity: severityOf(kind), source: "nimony",
+    var d = Diagnostic(rng: rng, severity: severityOf(kind), source: "aowlmony",
                        message: msg, related: @[])
     result.add FileDiag(file: key, diag: d)
     lastIdx = result.len - 1

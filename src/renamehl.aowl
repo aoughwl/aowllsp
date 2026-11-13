@@ -1,9 +1,9 @@
-## renamehl.nim — documentHighlight and rename, built on idetools `references`.
+## renamehl.aowl — documentHighlight and rename, built on idetools `references`.
 ## References come back as zero-width locations; both features widen them to the
 ## identifier span (length passed in by the caller, which has the document).
 
 import protocol, uris, state, idetools
-import aowlkit/json
+import util
 
 proc documentHighlightsJson*(cfg: Config; file, uri: string; p: Position;
                              wordLen: int; bufferText = ""): string =

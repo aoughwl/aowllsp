@@ -1,4 +1,4 @@
-## document.nim — an in-memory text document with LSP<->byte-offset mapping.
+## document.aowl — an in-memory text document with LSP<->byte-offset mapping.
 ##
 ## LSP `character` columns are UTF-16 code units. We keep the raw UTF-8 text plus
 ## a cached index of line-start byte offsets and translate between the two, so a
@@ -79,7 +79,7 @@ proc lineText*(d: Document; line: int): string =
   result = substr(d.text, s, e - 1)
 
 proc wordAt*(d: Document; p: Position): string =
-  ## The identifier surrounding the position (Nim identifier chars).
+  ## The identifier surrounding the position (aowlmony identifier chars).
   let off = offsetAt(d, p)
   proc isIdent(c: char): bool =
     (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or

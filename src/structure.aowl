@@ -1,9 +1,9 @@
-## structure.nim — LSP foldingRange + selectionRange as pure text heuristics.
+## structure.aowl — LSP foldingRange + selectionRange as pure text heuristics.
 ## No compiler artifacts required; indentation/identifier based.
 
 import std/strutils
 import protocol
-import aowlkit/json
+import util
 
 proc isBlankLine(s: string): bool =
   ## True if the line is empty or only whitespace.

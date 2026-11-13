@@ -1,4 +1,4 @@
-## semtokens.nim — LSP semanticTokens/full via the `aowllens` CLI.
+## semtokens.aowl — LSP semanticTokens/full via the `aowllens` CLI.
 ##
 ## `aowllens decls <file.s.nif>` prints a JSON array of declaration records
 ## `{"sym","name","kind","file","line","col"}` read off a sem'd NIF artifact
@@ -11,16 +11,16 @@
 ## introduced), not every use/reference of the symbol. That is a fine first
 ## version — a full implementation would also token-ize use sites.
 
-import std/[syncio, strutils, json]
+import std/[syncio, strutils]
 import state, driver
-import aowlkit/subprocess
+import util
 
 # --- LSP semantic-token legend (advertised by the server) ------------------
 
 const semTokenTypes* = ["namespace", "type", "function", "variable",
                         "parameter", "property", "enum", "enumMember", "keyword"]
 
-# --- small helpers (nimony has no join, stricter than Nim 2) ---------------
+# --- small helpers (aowlmony has no join) ---------------
 
 proc baseName(p: string): string =
   var i = p.len - 1
@@ -68,15 +68,10 @@ proc runDecls(cfg: Config; snif: string): seq[DeclRec] =
   if cfg.aowllensExe.len == 0 or snif.len == 0: return
   let cap = runCaptured(cfg.aowllensExe, @["decls", snif], "", false)
   if not cap.ok or cap.output.len == 0: return
-  var tree = default(JsonTree)
-  try:
-    tree = parseJson(cap.output)
-  except:
-    return
-  let arr = tree.root
-  if arr.kind != JArray: return
+  let arr = parseJsonOrNull(cap.output)
+  if kindOf(arr) != jnArray: return
   for el in items(arr):
-    if el.kind != JObject: continue
+    if kindOf(el) != jnObject: continue
     var rec = DeclRec(name: "", kind: "", file: "", line: 0, col: 0,
                       sawLine: false)
     for k, v in pairs(el):
@@ -118,7 +113,7 @@ proc semanticTokensFull*(cfg: Config; file: string): string =
     toks.add (line: l, col: r.col, length: r.name.len,
               typ: kindToTokenType(r.kind))
 
-  # insertion sort by (line, col); copy via temp — nimony rejects a[i]=a[j]
+  # insertion sort by (line, col); copy via temp — aowlmony rejects a[i]=a[j]
   for i in 1 ..< toks.len:
     let key = toks[i]
     var j = i - 1

@@ -1,4 +1,4 @@
-## codeactions.nim — LSP textDocument/codeAction by delegating to `aowlsuggest`.
+## codeactions.aowl — LSP textDocument/codeAction by delegating to `aowlsuggest`.
 ##
 ## `aowlsuggest lsp --stdin` reads a buffer on stdin and prints ONE JSON object:
 ##   {"uri":..,"diagnostics":[...],"codeActions":[ CodeAction... ]}
@@ -10,8 +10,7 @@
 import std/syncio
 import std/strutils
 import state
-import aowlkit/subprocess
-import aowlkit/json as kjson
+import util
 
 proc matchingBracket(s: string; openIdx: int): int =
   ## Given `s[openIdx]` is an opening bracket (`[` or `{`), return the index of
@@ -138,7 +137,7 @@ proc fixAllAction*(cfg: Config; uri, file, bufferText: string;
     return ""
   let rng = "{\"start\":{\"line\":0,\"character\":0}," &
     "\"end\":{\"line\":" & $endLine & ",\"character\":" & $endChar & "}}"
-  let edit = "{\"range\":" & rng & ",\"newText\":" & kjson.jStr(cap.output) & "}"
+  let edit = "{\"range\":" & rng & ",\"newText\":" & jStr(cap.output) & "}"
   result = "{\"title\":\"Fix all auto-fixable problems (aowlsuggest)\"," &
     "\"kind\":\"source.fixAll\",\"isPreferred\":true," &
-    "\"edit\":{\"changes\":{" & kjson.jStr(uri) & ":[" & edit & "]}}}"
+    "\"edit\":{\"changes\":{" & jStr(uri) & ":[" & edit & "]}}}"

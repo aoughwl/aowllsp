@@ -1,17 +1,15 @@
-## symbols.nim — LSP documentSymbol / workspaceSymbol via the `aowllens` CLI.
+## symbols.aowl — LSP documentSymbol / workspaceSymbol via the `aowllens` CLI.
 ##
 ## `aowllens decls <file.s.nif>` prints a JSON array of declaration records
 ## `{"sym","name","kind","file","line","col"}` read off a sem'd NIF artifact
-## (line 1-based, col 0-based). We shell out through aowlkit, parse the JSON
-## with nimony's lazy-cursor std/json (scalars extracted DURING iteration only),
-## and hand-build the LSP JSON reply.
+## (line 1-based, col 0-based). We shell out through util.aowl, parse the JSON
+## with jsonref, and hand-build the LSP JSON reply.
 
-import std/[syncio, strutils, json, os, dirs, paths]
+import std/[syncio, strutils, os, dirs, paths]
 import state, protocol, driver, uris
-import aowlkit/json as ajson
-import aowlkit/subprocess
+import util
 
-# --- small helpers (nimony has no join, stricter than Nim 2) ---------------
+# --- small helpers (aowlmony has no join) ---------------
 
 proc baseName(p: string): string =
   var i = p.len - 1
@@ -74,15 +72,10 @@ proc runDecls(cfg: Config; snif: string): seq[DeclRec] =
   if cfg.aowllensExe.len == 0 or snif.len == 0: return
   let cap = runCaptured(cfg.aowllensExe, @["decls", snif], "", false)
   if not cap.ok or cap.output.len == 0: return
-  var tree = default(JsonTree)
-  try:
-    tree = parseJson(cap.output)
-  except:
-    return
-  let arr = tree.root
-  if arr.kind != JArray: return
+  let arr = parseJsonOrNull(cap.output)
+  if kindOf(arr) != jnArray: return
   for el in items(arr):
-    if el.kind != JObject: continue
+    if kindOf(el) != jnObject: continue
     var rec = DeclRec(name: "", kind: "", file: "", line: 0, col: 0,
                       sawLine: false)
     for k, v in pairs(el):
@@ -137,7 +130,7 @@ proc documentSymbols*(cfg: Config; file: string): string =
     if r.name.len == 0: continue
     if baseName(r.file) != want: continue
     let rj = rangeJson(lineRange(r.line, r.col))
-    parts.add "{\"name\":" & ajson.jStr(r.name) &
+    parts.add "{\"name\":" & jStr(r.name) &
       ",\"kind\":" & $kindToLsp(r.kind) &
       ",\"range\":" & rj &
       ",\"selectionRange\":" & rj & "}"
@@ -150,23 +143,7 @@ proc documentSymbols*(cfg: Config; file: string): string =
 # --- workspaceSymbol --------------------------------------------------------
 
 proc gatherSnifs(cfg: Config): seq[string] =
-  ## Every `*.s.nif` under <projectRoot>/nimcache/lsp/*/.
-  result = @[]
-  let base = cfg.projectRoot & "/nimcache/lsp"
-  if not dirExists(base): return
-  try:
-    for k, sub in walkDir(path(base)):
-      if k != pcDir: continue
-      let subs = $sub
-      try:
-        for k2, f in walkDir(path(subs)):
-          if k2 != pcFile: continue
-          let fs = $f
-          if endsWith(fs, ".s.nif"): result.add fs
-      except:
-        discard
-  except:
-    discard
+  cacheSnifs(cfg, 200)
 
 proc workspaceSymbols*(cfg: Config; query: string): string =
   ## Returns a JSON array (string) of LSP SymbolInformation[] matching `query`.
@@ -189,7 +166,7 @@ proc workspaceSymbols*(cfg: Config; query: string): string =
       seenKeys.add key
       let uri = pathToUri(r.file)
       let loc = Location(uri: uri, rng: lineRange(r.line, r.col))
-      parts.add "{\"name\":" & ajson.jStr(r.name) &
+      parts.add "{\"name\":" & jStr(r.name) &
         ",\"kind\":" & $kindToLsp(r.kind) &
         ",\"location\":" & locationJson(loc) & "}"
   result = "["

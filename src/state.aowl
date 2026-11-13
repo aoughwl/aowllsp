@@ -1,0 +1,76 @@
+## state.aowl — server configuration and the open-document registry.
+
+import std/[tables, envvars, os]
+import document, util
+
+type
+  Config* = object
+    aowlmonyExe*: string        ## path to the `aowlmony` binary
+    aowlsuggestExe*: string   ## path to `aowlsuggest` (recovering syntax diags); "" = off
+    aowllensExe*: string      ## path to `aowllens` (NIF artifact reader); "" = off
+    aowlfmtExe*: string       ## path to `aowlfmt` (verified formatter); "" = off
+    extraPaths*: seq[string]   ## extra --path entries
+    projectRoot*: string       ## workspace root (filesystem path)
+    styleFlags*: seq[string]   ## opt-in aowlsuggest style args (`--pedantic`,
+                               ## `--style:CAT`); empty = default lint only
+
+  ServerState* = object
+    config*: Config
+    docs*: Table[string, Document]   ## keyed by URI
+    rootUri*: string
+    initialized*: bool
+    shutdownRequested*: bool
+
+proc exeDir(): string =
+  ## Directory of the running server exe, `/`-separated ("" when unknown).
+  var a = ""
+  try: a = slashes(getAppFilename())
+  except: a = ""
+  var i = a.len - 1
+  while i >= 0 and a[i] != '/': dec i
+  if i < 0: "" else: substr(a, 0, i - 1)
+
+proc findTool(envName, base: string): string =
+  ## A helper CLI: the env override, else `<exe dir>/<base>.exe`, else "" (the
+  ## feature that needs it is then silently off).
+  let e = envOr(envName, "")
+  if e.len > 0: return e
+  let d = exeDir()
+  if d.len > 0:
+    let c = d & "/" & base & ".exe"
+    if fileExists(c): return c
+  return ""
+
+proc findAowlmony(): string =
+  let e = envOr("AOWLMONY_EXE", "")
+  if e.len > 0: return e
+  let root = envOr("AOWLMONY_ROOT", "")
+  if root.len > 0:
+    let c = slashes(root) & "/bin/aowlmony.exe"
+    if fileExists(c): return c
+  let t = findTool("AOWLMONY_EXE", "aowlmony")
+  if t.len > 0: return t
+  return "aowlmony.exe"      # whatever PATH resolves; the only hard dependency
+
+proc defaultConfig*(): Config =
+  Config(
+    aowlmonyExe: findAowlmony(),
+    aowlsuggestExe: findTool("AOWLSUGGEST", "aowlsuggest"),
+    aowllensExe: findTool("AOWLLENS", "aowllens"),
+    aowlfmtExe: findTool("AOWLFMT", "aowlfmt"),
+    extraPaths: @[],
+    projectRoot: "",
+    styleFlags: @[])
+
+proc newServerState*(): ServerState =
+  ServerState(config: defaultConfig(), docs: initTable[string, Document](),
+              rootUri: "", initialized: false, shutdownRequested: false)
+
+proc openDoc*(s: var ServerState; uri, languageId: string; version: int; text: string) =
+  s.docs[uri] = newDocument(uri, languageId, version, text)
+
+proc closeDoc*(s: var ServerState; uri: string) =
+  if s.docs.hasKey(uri): s.docs.del(uri)
+
+proc hasDoc*(s: ServerState; uri: string): bool =
+  s.docs.hasKey(uri)

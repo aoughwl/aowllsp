@@ -1,4 +1,4 @@
-## callhier.nim — LSP call hierarchy.
+## callhier.aowl — LSP call hierarchy.
 ##
 ##   * prepareCallHierarchy — resolve the symbol under the cursor to a
 ##     CallHierarchyItem (name/kind/range), stashing its declaration position in
@@ -11,10 +11,9 @@
 ##     when that command isn't available, so it's never wrong, only sometimes
 ##     empty.
 
-import std/[strutils, json]
+import std/[strutils]
 import protocol, state, uris, driver, idetools, symbols
-import aowlkit/json as ajson
-import aowlkit/subprocess
+import util
 
 proc routineKind(kind: string): bool =
   kind == "proc" or kind == "func" or kind == "method" or
@@ -31,9 +30,9 @@ proc itemJson(name: string; kind: int; uri: string; rng: Range;
               dataUri: string; dataLine, dataCol: int): string =
   ## A CallHierarchyItem carrying the def position in `data` for later requests.
   let r = rangeJson(rng)
-  result = "{\"name\":" & ajson.jStr(name) & ",\"kind\":" & $kind &
-    ",\"uri\":" & ajson.jStr(uri) & ",\"range\":" & r & ",\"selectionRange\":" & r &
-    ",\"data\":{\"uri\":" & ajson.jStr(dataUri) & ",\"line\":" & $dataLine &
+  result = "{\"name\":" & jStr(name) & ",\"kind\":" & $kind &
+    ",\"uri\":" & jStr(uri) & ",\"range\":" & r & ",\"selectionRange\":" & r &
+    ",\"data\":{\"uri\":" & jStr(dataUri) & ",\"line\":" & $dataLine &
     ",\"character\":" & $dataCol & "}}"
 
 # --- prepare ----------------------------------------------------------------
@@ -60,7 +59,7 @@ proc prepareCallHierarchy*(cfg: Config; file: string; p: Position;
 # --- incoming ---------------------------------------------------------------
 
 proc baseSym(sym: string): string =
-  ## `foo.0.abc` -> `foo` (strip the nimony symbol suffix for display).
+  ## `foo.0.abc` -> `foo` (strip the aowlmony symbol suffix for display).
   var i = 0
   while i < sym.len and sym[i] != '.': inc i
   substr(sym, 0, i - 1)
@@ -78,15 +77,10 @@ proc allCalls(cfg: Config; snif: string): seq[CallRec] =
   if cfg.aowllensExe.len == 0 or snif.len == 0: return
   let cap = runCaptured(cfg.aowllensExe, @["calls", snif], "", false)
   if not cap.ok or cap.output.len == 0: return
-  var tree = default(JsonTree)
-  try:
-    tree = parseJson(cap.output)
-  except:
-    return
-  let arr = tree.root
-  if arr.kind != JArray: return
+  let arr = parseJsonOrNull(cap.output)
+  if kindOf(arr) != jnArray: return
   for el in items(arr):
-    if el.kind != JObject: continue
+    if kindOf(el) != jnObject: continue
     var rec = CallRec(caller: "", callee: "", line: 0, col: 0)
     for k, v in pairs(el):
       case k

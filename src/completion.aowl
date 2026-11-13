@@ -1,11 +1,11 @@
-## completion.nim — LSP textDocument/completion.
+## completion.aowl — LSP textDocument/completion.
 ##
 ## Gathers candidate symbols from the `aowllens` NIF-artifact reader (the same
 ## seam navigation uses) and filters them by the identifier prefix under the
 ## cursor. Candidates come from three places, unioned + deduped by name:
 ##   1. `aowllens decls <snif>` on THIS file's main artifact — its own decls.
 ##   2. `aowllens index <snif>` on the same artifact — the module's exports.
-##   3. `aowllens decls` on EVERY `*.s.nif` under `<projectRoot>/nimcache/lsp/`
+##   3. `aowllens decls` on EVERY `*.s.nif` under `<projectRoot>/.aowllsp/cache/`
 ##      — so symbols from imported modules are offered too.
 ##
 ## MEMBER ACCESS (`receiver.<here>`) is TYPE-DIRECTED: when the cursor sits after
@@ -23,10 +23,9 @@
 ##     if the trailing name `b` is itself a resolvable binding/type.
 ##   * Filtering is a case-sensitive prefix match on the demangled name.
 
-import std/[strutils, os, dirs, paths, tables, sets, json]
+import std/[strutils, os, dirs, paths, tables, sets]
 import state, driver
-import aowlkit/json
-import aowlkit/subprocess
+import util
 
 # ── LSP CompletionItemKind mapping ──────────────────────────────────────────
 
@@ -157,15 +156,10 @@ proc collectDecls(cfg: Config; snif, prefix: string;
   if cfg.aowllensExe.len == 0 or snif.len == 0: return
   let cap = runCaptured(cfg.aowllensExe, @["decls", snif], "", true)
   if not cap.ok: return
-  var tree = default(JsonTree)
-  try:
-    tree = parseJson(cap.output)
-  except:
-    return
-  var arr = tree.root
-  if kind(arr) != JArray: return
+  let arr = parseJsonOrNull(cap.output)
+  if not isArr(arr): return
   for el in items(arr):
-    if kind(el) != JObject: continue
+    if not isObj(el): continue
     var name = ""
     var kd = ""
     var sym = ""
@@ -185,18 +179,13 @@ proc collectExports(cfg: Config; snif, prefix: string;
   if cfg.aowllensExe.len == 0 or snif.len == 0: return
   let cap = runCaptured(cfg.aowllensExe, @["index", snif], "", true)
   if not cap.ok: return
-  var tree = default(JsonTree)
-  try:
-    tree = parseJson(cap.output)
-  except:
-    return
-  var obj = tree.root
-  if kind(obj) != JObject: return
+  let obj = parseJsonOrNull(cap.output)
+  if not isObj(obj): return
   for k, v in pairs(obj):
     if k != "exports": continue
-    if kind(v) != JArray: continue
+    if not isArr(v): continue
     for el in items(v):
-      if kind(el) != JObject: continue
+      if not isObj(el): continue
       var name = ""
       var kd = ""
       var sym = ""
@@ -211,7 +200,7 @@ proc collectExports(cfg: Config; snif, prefix: string;
 proc massageMemberAccess(bufferText: string; line, dotCol: int): string =
   ## Blank the member-access dot and the partial member name after it, so a line
   ## the user is mid-typing (`o.inner.xy`, or a dangling `o.inner.`) PARSES —
-  ## otherwise nimony rejects the whole module and there is no `.s.nif` to resolve
+  ## otherwise aowlmony rejects the whole module and there is no `.s.nif` to resolve
   ## the receiver's type against. Every column left of the dot is preserved, so a
   ## position query still lands on the same receiver symbol.
   var lines = split(bufferText, '\n')
@@ -237,13 +226,8 @@ proc typeAtQuery(cfg: Config; snif: string; line, col: int): string =
   let cap = runCaptured(cfg.aowllensExe,
                         @["typeat", snif, $line, $col], "", true)
   if not cap.ok: return ""
-  var tree = default(JsonTree)
-  try:
-    tree = parseJson(cap.output)
-  except:
-    return ""
-  let obj = tree.root
-  if kind(obj) != JObject: return ""
+  let obj = parseJsonOrNull(cap.output)
+  if not isObj(obj): return ""
   for k, v in pairs(obj):
     if k == "type": return getStr(v)
   return ""
@@ -258,15 +242,10 @@ proc collectMembers(cfg: Config; snif, receiver, prefix: string;
   if cfg.aowllensExe.len == 0 or snif.len == 0 or receiver.len == 0: return
   let cap = runCaptured(cfg.aowllensExe, @["members", snif, receiver], "", true)
   if not cap.ok: return
-  var tree = default(JsonTree)
-  try:
-    tree = parseJson(cap.output)
-  except:
-    return
-  var arr = tree.root
-  if kind(arr) != JArray: return
+  let arr = parseJsonOrNull(cap.output)
+  if not isArr(arr): return
   for el in items(arr):
-    if kind(el) != JObject: continue
+    if not isObj(el): continue
     var name = ""
     var kd = ""
     var detail = ""
@@ -285,28 +264,8 @@ proc collectMembers(cfg: Config; snif, receiver, prefix: string;
     detailOf[name] = detail
 
 proc lspSnifs(cfg: Config): seq[string] =
-  ## Every `*.s.nif` under `<projectRoot>/nimcache/lsp/` (one dir per module).
-  result = @[]
-  let root = if cfg.projectRoot.len > 0: cfg.projectRoot else: "."
-  let base = root & "/nimcache/lsp"
-  if not dirExists(base): return
-  try:
-    for kind, p in walkDir(path(base)):
-      let ps = $p
-      if kind == pcFile:
-        if endsWith(ps, ".s.nif") and not endsWith(ps, ".s.idx.nif"):
-          result.add ps
-      elif kind == pcDir:
-        try:
-          for k2, f in walkDir(path(ps)):
-            if k2 == pcFile:
-              let fs = $f
-              if endsWith(fs, ".s.nif") and not endsWith(fs, ".s.idx.nif"):
-                result.add fs
-        except:
-          discard
-  except:
-    discard
+  ## One artifact per distinct module in the per-module caches (see driver).
+  cacheSnifs(cfg)
 
 # ── sort (selection, ascending, case-sensitive) ─────────────────────────────
 

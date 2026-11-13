@@ -1,4 +1,4 @@
-## hints.nim — the "extra" LSP features that ride on the same seams as the core
+## hints.aowl — the "extra" LSP features that ride on the same seams as the core
 ## ones, no new type info required:
 ##
 ##   * signatureHelp   — the callee's declaration line, with the active
@@ -8,12 +8,12 @@
 ##                       opening a file stays cheap).
 ##   * documentLink    — `import` / `include` module names linked to their file.
 ##
-## Everything here is derived from what `nimony` and `aowllens` already give us
+## Everything here is derived from what `aowlmony` and `aowllens` already give us
 ## (definition, references, decls) — no formatter and no new NIF reading.
 
 import std/[strutils, syncio, os]
 import protocol, state, uris, idetools, symbols
-import aowlkit/json as ajson
+import util
 
 # --- line access ------------------------------------------------------------
 
@@ -119,12 +119,12 @@ proc signatureHelpJson*(cfg: Config; file: string; line, ch: int;
   var pj = "["
   for i in 0 ..< params.len:
     if i > 0: pj.add ","
-    pj.add "{\"label\":" & ajson.jStr(params[i]) & "}"
+    pj.add "{\"label\":" & jStr(params[i]) & "}"
   pj.add "]"
   let active = if params.len == 0: 0
                elif activeParam >= params.len: params.len - 1
                else: activeParam
-  result = "{\"signatures\":[{\"label\":" & ajson.jStr(dline) &
+  result = "{\"signatures\":[{\"label\":" & jStr(dline) &
     ",\"parameters\":" & pj & "}],\"activeSignature\":0,\"activeParameter\":" &
     $active & "}"
 
@@ -138,7 +138,7 @@ proc onlyRoutines(kind: string): bool =
 proc codeLensesJson*(cfg: Config; file, uri: string): string =
   ## One unresolved lens per top-level routine/type. The reference count is
   ## filled in later by codeLens/resolve, so opening a file spawns no extra
-  ## `nimony` runs.
+  ## `aowlmony` runs.
   let decls = fileDecls(cfg, file)
   var parts: seq[string] = @[]
   for i in 0 ..< decls.len:
@@ -146,7 +146,7 @@ proc codeLensesJson*(cfg: Config; file, uri: string): string =
     if not onlyRoutines(d.kind): continue
     let rng = rangeJson(mkRange(d.line, d.col, d.line, d.col + d.name.len))
     # `data` carries what resolve needs: the URI and the name's position.
-    let data = "{\"uri\":" & ajson.jStr(uri) & ",\"line\":" & $d.line &
+    let data = "{\"uri\":" & jStr(uri) & ",\"line\":" & $d.line &
       ",\"character\":" & $d.col & "}"
     parts.add "{\"range\":" & rng & ",\"data\":" & data & "}"
   result = "["
@@ -163,7 +163,7 @@ proc resolveCodeLensJson*(cfg: Config; uri: string; line, ch: int;
   let n = refs.len
   let title = (if n == 1: "1 reference" else: $n & " references")
   let rng = rangeJson(mkRange(line, ch, line, ch))
-  result = "{\"range\":" & rng & ",\"command\":{\"title\":" & ajson.jStr(title) &
+  result = "{\"range\":" & rng & ",\"command\":{\"title\":" & jStr(title) &
     ",\"command\":\"\"}}"
 
 # --- documentLink -----------------------------------------------------------
@@ -173,16 +173,12 @@ proc resolveModule(cfg: Config; docDir, name: string): string =
   ## Tries the doc's own directory first, then each configured extra path.
   var rel = name
   # `std / strutils` style already normalised by the caller into `std/strutils`.
-  let cands = @[docDir & "/" & rel & ".nim",
-                docDir & "/" & rel & ".nimony"]
-  for c in cands:
-    if fileExists(c): return c
+  let c0 = docDir & "/" & rel & ".aowl"
+  if fileExists(c0): return c0
   for i in 0 ..< cfg.extraPaths.len:
     let p = cfg.extraPaths[i]
-    let c1 = p & "/" & rel & ".nim"
+    let c1 = p & "/" & rel & ".aowl"
     if fileExists(c1): return c1
-    let c2 = p & "/" & rel & ".nimony"
-    if fileExists(c2): return c2
   return ""
 
 proc dirOf(p: string): string =
@@ -192,7 +188,7 @@ proc dirOf(p: string): string =
 
 proc addLink(parts: var seq[string]; lineNo, startCol, endCol: int; target: string) =
   let rng = rangeJson(mkRange(lineNo, startCol, lineNo, endCol))
-  parts.add "{\"range\":" & rng & ",\"target\":" & ajson.jStr(pathToUri(target)) & "}"
+  parts.add "{\"range\":" & rng & ",\"target\":" & jStr(pathToUri(target)) & "}"
 
 proc documentLinksJson*(cfg: Config; file, bufferText: string): string =
   ## Link the module names in `import` / `include` / `from ... import` lines to

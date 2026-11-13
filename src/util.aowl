@@ -1,0 +1,209 @@
+## util.aowl -- the small shared core of aowllsp: JSON text builders, a
+## per-process temp path, and whole-output subprocess capture.
+##
+## This replaces the retired `aowlkit` library (json / subprocess / tempfile).
+## JSON *reading* is `jsonref`; JSON *writing* stays hand-built text because the
+## server emits large LSP payloads and every call site already assembles them
+## from fragments. Each helper here is also a std candidate (see TOOLCHAIN-GAPS).
+
+import std/[osproc, syncio, paths, dirs, strutils, appdirs, monotimes, envvars]
+import jsonref
+
+export jsonref
+
+# ---------------------------------------------------------------------------
+# JSON text builders
+# ---------------------------------------------------------------------------
+
+proc jsonEscape*(s: string): string =
+  ## Escape a string's contents per the JSON spec (no surrounding quotes).
+  result = ""
+  for i in 0 ..< s.len:
+    let c = s[i]
+    case c
+    of '"': result.add "\\\""
+    of '\\': result.add "\\\\"
+    of '\n': result.add "\\n"
+    of '\t': result.add "\\t"
+    of '\r': result.add "\\r"
+    of '\b': result.add "\\b"
+    of '\f': result.add "\\f"
+    else:
+      if c < ' ':
+        const hexd = "0123456789abcdef"
+        result.add "\\u00"
+        result.add hexd[(ord(c) shr 4) and 0xF]
+        result.add hexd[ord(c) and 0xF]
+      else:
+        result.add c
+
+proc jStr*(s: string): string =
+  ## A quoted, escaped JSON string literal.
+  "\"" & jsonEscape(s) & "\""
+
+proc jBool*(b: bool): string =
+  if b: "true" else: "false"
+
+proc jArr*(items: seq[string]): string =
+  ## A JSON array of already-rendered element fragments.
+  result = "["
+  for i in 0 ..< items.len:
+    if i > 0: result.add ","
+    result.add items[i]
+  result.add "]"
+
+proc parseJsonOrNull*(s: string): JsonValue =
+  ## Parse `s`; on malformed input return nil (every jsonref accessor takes nil).
+  var err = ""
+  result = parseJson(s, err)
+  if err.len > 0: result = nil
+
+proc jInt*(n: JsonValue; default = 0): int =
+  ## `getInt` narrowed to `int`.
+  int(getInt(n, int64(default)))
+
+# ---------------------------------------------------------------------------
+# strings
+# ---------------------------------------------------------------------------
+
+proc joinWith*(parts: seq[string]; sep: string): string =
+  ## strutils has no `join` in this toolchain.
+  result = ""
+  for i in 0 ..< parts.len:
+    if i > 0: result.add sep
+    result.add parts[i]
+
+# ---------------------------------------------------------------------------
+# temp paths
+# ---------------------------------------------------------------------------
+
+var gTmpCounter = 0
+
+proc slashes*(p: string): string =
+  ## Backslashes to forward slashes (every path inside the server is `/`-form).
+  result = p
+  for i in 0 ..< result.len:
+    if result[i] == '\\': result[i] = '/'
+
+proc tempPath*(tag, ext: string): string =
+  ## A temp path unique within and across runs (monotonic tick + counter).
+  inc gTmpCounter
+  var ticks = 0'i64
+  try:
+    ticks = getMonoTime().ticks
+  except:
+    ticks = 0
+  var td = "."
+  try:
+    td = slashes($getTempDir())
+  except:
+    td = "."
+  if td.len > 1 and td[td.len - 1] == '/':
+    td = substr(td, 0, td.len - 2)
+  result = td & "/aowllsp_" & tag & "_" & $ticks & "_" & $gTmpCounter & ext
+
+# ---------------------------------------------------------------------------
+# subprocess capture
+# ---------------------------------------------------------------------------
+
+type
+  CaptureResult* = object
+    output*: string    ## the captured stdout (and stderr if merged)
+    exitCode*: int     ## the child's exit code, or -1 if it could not be run
+    ok*: bool          ## false only when the process could not run / be read
+
+const DevNull* = "nul"
+
+proc shellExec*(command: string): int {.raises.} =
+  ## Run `command` through cmd.exe. `/s /c "..."` strips exactly the outer
+  ## quote pair, so the command's own quoting survives.
+  result = execCmd("cmd /d /s /c \"" & command & "\"")
+
+proc shellQuote*(s: string): string =
+  ## Double-quote for cmd.exe, using native backslash separators (cmd's own
+  ## builtins and many exes reject `/` paths).
+  var t = s.replace("/", "\\")
+  result = "\"" & t.replace("\"", "\"\"") & "\""
+
+proc argQuote(s: string): string =
+  ## Quote an ARGUMENT (not a path): flags such as `--def:a/b.aowl,1,2` must keep
+  ## their `/` form, so only wrap and escape quotes.
+  "\"" & s.replace("\"", "\"\"") & "\""
+
+proc captureShell*(command: string; merge: bool): CaptureResult =
+  ## Run `command` through the shell with stdout redirected to a temp file we
+  ## then read whole (pipes through execProcess mangle long single-line JSON).
+  ## `merge` also captures stderr; otherwise stderr is discarded.
+  let outPath = tempPath("out", ".txt")
+  let tail = if merge: " 2>&1" else: " 2>" & DevNull
+  let full = command & " > " & shellQuote(outPath) & tail
+  var code = -1
+  try:
+    code = shellExec(full)
+  except:
+    return CaptureResult(output: "", exitCode: -1, ok: false)
+  var outp = ""
+  try:
+    outp = readFile(outPath)
+  except:
+    return CaptureResult(output: "", exitCode: code, ok: false)
+  try: removeFile(path(outPath))
+  except: discard
+  result = CaptureResult(output: outp, exitCode: code, ok: true)
+
+proc buildCmd(exe: string; args: seq[string]; workdir: string): string =
+  result = ""
+  if workdir.len > 0:
+    result.add "cd /d " & shellQuote(workdir) & " && "
+  result.add shellQuote(exe)
+  for i in 0 ..< args.len:
+    result.add " " & argQuote(args[i])
+
+proc runCaptured*(exe: string; args: seq[string]; workdir = "";
+                  mergeStderr = true): CaptureResult =
+  ## Run `exe args...` (each argument quoted) optionally in `workdir`, capturing
+  ## output whole.
+  captureShell(buildCmd(exe, args, workdir), mergeStderr)
+
+proc runWithInput*(exe: string; args: seq[string]; input: string;
+                   workdir = ""): CaptureResult =
+  ## Run `exe args...` feeding `input` on stdin (via a temp file), capturing
+  ## stdout whole; stderr is discarded.
+  let inPath = tempPath("in", ".txt")
+  let outPath = tempPath("out", ".txt")
+  try:
+    writeFile(inPath, input)
+  except:
+    return CaptureResult(output: "", exitCode: -1, ok: false)
+  var cmd = buildCmd(exe, args, workdir)
+  cmd.add " < " & shellQuote(inPath) & " > " & shellQuote(outPath) & " 2>" & DevNull
+  var code = -1
+  try:
+    code = shellExec(cmd)
+  except:
+    code = -1
+  var outp = ""
+  var okRead = true
+  try:
+    outp = readFile(outPath)
+  except:
+    okRead = false
+  try: removeFile(path(inPath))
+  except: discard
+  try: removeFile(path(outPath))
+  except: discard
+  if not okRead:
+    return CaptureResult(output: "", exitCode: code, ok: false)
+  result = CaptureResult(output: outp, exitCode: code, ok: true)
+
+proc envOr*(name, dflt: string): string =
+  var v = ""
+  try: v = getEnv(name)
+  except: v = ""
+  if v.len > 0: v else: dflt
+
+proc isArr*(n: JsonValue): bool =
+  n != nil and n.kind == jnArray
+
+proc isObj*(n: JsonValue): bool =
+  n != nil and n.kind == jnObject

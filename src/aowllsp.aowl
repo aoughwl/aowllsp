@@ -1,225 +1,141 @@
-## aowllsp — a Language Server for Nimony, written in nimony.
+## aowllsp -- a Language Server for aowlmony, written in aowlmony.
 ##
-## A nimony rewrite of the (Nim 2) nimony-lsp. Phase 1 covers the LSP lifecycle,
-## full-text document sync, diagnostics (from `nimony check`), and navigation
-## (definition / references / hover via `nimony check --def/--usages`). The
-## in-process semantic-index features (completion, semantic tokens, call/type
-## hierarchy) come in later phases, reading NIF through the nimony-native reader
-## rather than shelling out.
+## Covers the LSP lifecycle, full-text document sync, diagnostics (from
+## `aowlmony check`), navigation (definition / references / hover via
+## `aowlmony check --def/--usages`), and the semantic-index features
+## (completion, semantic tokens, symbols, call/type hierarchy, inlay hints)
+## which read the sem'd NIF artifacts through the `aowllens` CLI. Recovering
+## syntax diagnostics and code actions come from the `aowlsuggest` CLI.
+## `aowllens` / `aowlsuggest` / `aowlfmt` are optional: found next to this exe
+## (or via env AOWLLENS / AOWLSUGGEST / AOWLFMT) and silently off when absent.
 ##
-## Everything semantic goes through `driver.nim` — the subprocess seam a future
+## Everything semantic goes through `driver.aowl` -- the subprocess seam a future
 ## browser build swaps for in-process aowlparser/aowlsem calls.
 
-import std/[syncio, json, tables, strutils]
-import aowlkit/json as kjson
+import std/[syncio, tables, strutils]
+import util
 import framing, protocol, uris, state, document, diagnostics, idetools, syntaxdiag
 import driver, symbols, completion, codeactions, semtokens, structure, renamehl
 import hints, typeinfo, formatting, callhier, typehier
 
 const serverVersion = "0.1.0"
 
-# ── JSON-RPC request parsing (immediate extraction; cursors are lazy) ────────
+# ── JSON-RPC request parsing (jsonref: nil-safe chained access) ──────────────
 
-proc parseHeader(root: JsonNode; meth: var string; hasId: var bool;
+proc uriOf(n: JsonValue): string =
+  ## A document URI from the request, in the server's canonical form (so the
+  ## editor's `file:///c%3A/x` and our `file:///C:/x` name the same buffer).
+  normUri(getStr(n))
+
+proc parseHeader(root: JsonValue; meth: var string; hasId: var bool;
                  idJson: var string) =
-  for k, v in pairs(root):
-    case k
-    of "method": meth = v.getStr
-    of "id":
-      hasId = true
-      if v.kind == JString: idJson = "\"" & v.getStr & "\""
-      else: idJson = $v.getInt
-    else: discard
+  meth = getStr(root{"method"})
+  let v = root{"id"}
+  if v != nil and v.kind != jnNull:
+    hasId = true
+    if v.kind == jnString: idJson = jStr(v.sval)
+    elif v.kind == jnNumber: idJson = v.num
 
-proc applyInitOptions(v2: JsonNode; cfg: var Config) =
-  ## Read `initializationOptions` — the editor's per-workspace overrides for the
+proc applyInitOptions(o: JsonValue; cfg: var Config) =
+  ## Read `initializationOptions` -- the editor's per-workspace overrides for the
   ## tool paths and search paths. Anything absent keeps its env/default value.
-  for k3, v3 in pairs(v2):
-    case k3
-    of "nimonyExe": cfg.nimonyExe = v3.getStr
-    of "aowlsuggestExe": cfg.aowlsuggestExe = v3.getStr
-    of "aowllensExe": cfg.aowllensExe = v3.getStr
-    of "aowlfmtExe": cfg.aowlfmtExe = v3.getStr
-    of "extraPaths":
-      var xs: seq[string] = @[]
-      for el in items(v3): xs.add el.getStr
-      cfg.extraPaths = xs
-    of "pedantic":
-      # `"pedantic": true` → enable aowlsuggest's safe style set live in the editor
-      if v3.kind == JBool and v3.getBool:
-        var found = false
-        for f in cfg.styleFlags:
-          if f == "--pedantic": found = true
-        if not found: cfg.styleFlags.add "--pedantic"
-    of "style":
-      # `"style": ["trailing-whitespace","lf",...]` → per-category opt-in
-      var xs: seq[string] = @[]
-      for el in items(v3):
-        let cat = el.getStr
-        if cat.len > 0: xs.add "--style:" & cat
-      cfg.styleFlags = xs
-    else: discard
+  if o{"aowlmonyExe"} != nil: cfg.aowlmonyExe = getStr(o{"aowlmonyExe"})
+  if o{"aowlsuggestExe"} != nil: cfg.aowlsuggestExe = getStr(o{"aowlsuggestExe"})
+  if o{"aowllensExe"} != nil: cfg.aowllensExe = getStr(o{"aowllensExe"})
+  if o{"aowlfmtExe"} != nil: cfg.aowlfmtExe = getStr(o{"aowlfmtExe"})
+  let xp = o{"extraPaths"}
+  if xp != nil:
+    var xs: seq[string] = @[]
+    for el in items(xp): xs.add getStr(el)
+    cfg.extraPaths = xs
+  # `"pedantic": true` -> enable aowlsuggest's safe style set live in the editor
+  if getBool(o{"pedantic"}):
+    var found = false
+    for f in cfg.styleFlags:
+      if f == "--pedantic": found = true
+    if not found: cfg.styleFlags.add "--pedantic"
+  # `"style": ["trailing-whitespace","lf",...]` -> per-category opt-in
+  let st = o{"style"}
+  if st != nil:
+    var xs: seq[string] = @[]
+    for el in items(st):
+      let cat = getStr(el)
+      if cat.len > 0: xs.add "--style:" & cat
+    cfg.styleFlags = xs
 
-proc parseInitialize(root: JsonNode; rootUri: var string; cfg: var Config) =
-  for k, v in pairs(root):
-    if k == "params":
-      for k2, v2 in pairs(v):
-        case k2
-        of "rootUri": rootUri = v2.getStr
-        of "rootPath":
-          if rootUri.len == 0: rootUri = pathToUri(v2.getStr)
-        of "initializationOptions": applyInitOptions(v2, cfg)
-        else: discard
+proc parseInitialize(root: JsonValue; rootUri: var string; cfg: var Config) =
+  let p = root{"params"}
+  rootUri = getStr(p{"rootUri"})
+  if rootUri.len > 0: rootUri = normUri(rootUri)
+  elif getStr(p{"rootPath"}).len > 0: rootUri = pathToUri(getStr(p{"rootPath"}))
+  if p{"initializationOptions"} != nil:
+    applyInitOptions(p{"initializationOptions"}, cfg)
 
-proc parseDidOpen(root: JsonNode; uri, langId, text: var string; version: var int) =
-  for k, v in pairs(root):
-    if k == "params":
-      for k2, v2 in pairs(v):
-        if k2 == "textDocument":
-          for k3, v3 in pairs(v2):
-            case k3
-            of "uri": uri = v3.getStr
-            of "languageId": langId = v3.getStr
-            of "version": version = int(v3.getInt)
-            of "text": text = v3.getStr
-            else: discard
+proc parseDidOpen(root: JsonValue; uri, langId, text: var string; version: var int) =
+  let td = root{"params"}{"textDocument"}
+  uri = uriOf(td{"uri"})
+  langId = getStr(td{"languageId"})
+  version = jInt(td{"version"})
+  text = getStr(td{"text"})
 
-proc parseDidChange(root: JsonNode; uri, text: var string; version: var int) =
-  for k, v in pairs(root):
-    if k == "params":
-      for k2, v2 in pairs(v):
-        if k2 == "textDocument":
-          for k3, v3 in pairs(v2):
-            case k3
-            of "uri": uri = v3.getStr
-            of "version": version = int(v3.getInt)
-            else: discard
-        elif k2 == "contentChanges":
-          for el in items(v2):
-            for k3, v3 in pairs(el):
-              if k3 == "text": text = v3.getStr   # FULL sync: whole buffer
+proc parseDidChange(root: JsonValue; uri, text: var string; version: var int) =
+  let p = root{"params"}
+  uri = uriOf(p{"textDocument"}{"uri"})
+  version = jInt(p{"textDocument"}{"version"})
+  # FULL sync: the last change carries the whole buffer
+  for el in items(p{"contentChanges"}):
+    if el{"text"} != nil: text = getStr(el{"text"})
 
-proc parseUriOnly(root: JsonNode; uri: var string) =
-  for k, v in pairs(root):
-    if k == "params":
-      for k2, v2 in pairs(v):
-        if k2 == "textDocument":
-          for k3, v3 in pairs(v2):
-            if k3 == "uri": uri = v3.getStr
+proc parseUriOnly(root: JsonValue; uri: var string) =
+  uri = uriOf(root{"params"}{"textDocument"}{"uri"})
 
-proc parseDocPos(root: JsonNode; uri: var string; line, character: var int) =
-  for k, v in pairs(root):
-    if k == "params":
-      for k2, v2 in pairs(v):
-        if k2 == "textDocument":
-          for k3, v3 in pairs(v2):
-            if k3 == "uri": uri = v3.getStr
-        elif k2 == "position":
-          for k3, v3 in pairs(v2):
-            case k3
-            of "line": line = int(v3.getInt)
-            of "character": character = int(v3.getInt)
-            else: discard
+proc parseDocPos(root: JsonValue; uri: var string; line, character: var int) =
+  let p = root{"params"}
+  uri = uriOf(p{"textDocument"}{"uri"})
+  line = jInt(p{"position"}{"line"})
+  character = jInt(p{"position"}{"character"})
 
-proc parseCodeActionRange(root: JsonNode; uri: var string; loLine, hiLine: var int) =
-  for k, v in pairs(root):
-    if k == "params":
-      for k2, v2 in pairs(v):
-        if k2 == "textDocument":
-          for k3, v3 in pairs(v2):
-            if k3 == "uri": uri = v3.getStr
-        elif k2 == "range":
-          for k3, v3 in pairs(v2):
-            if k3 == "start":
-              for k4, v4 in pairs(v3):
-                if k4 == "line": loLine = int(v4.getInt)
-            elif k3 == "end":
-              for k4, v4 in pairs(v3):
-                if k4 == "line": hiLine = int(v4.getInt)
+proc parseCodeActionRange(root: JsonValue; uri: var string; loLine, hiLine: var int) =
+  let p = root{"params"}
+  uri = uriOf(p{"textDocument"}{"uri"})
+  let r = p{"range"}
+  if r{"start"}{"line"} != nil: loLine = jInt(r{"start"}{"line"})
+  if r{"end"}{"line"} != nil: hiLine = jInt(r{"end"}{"line"})
 
-proc parseCodeActionOnly(root: JsonNode; only: var seq[string]) =
+proc parseCodeActionOnly(root: JsonValue; only: var seq[string]) =
   ## Extract `params.context.only` (the CodeActionKind filter) so the server can
   ## skip work the client didn't ask for (e.g. quickfix-only vs source.fixAll).
-  for k, v in pairs(root):
-    if k == "params":
-      for k2, v2 in pairs(v):
-        if k2 == "context":
-          for k3, v3 in pairs(v2):
-            if k3 == "only":
-              for el in items(v3): only.add el.getStr
+  for el in items(root{"params"}{"context"}{"only"}): only.add getStr(el)
 
-proc parseRename(root: JsonNode; uri: var string; line, character: var int;
+proc parseRename(root: JsonValue; uri: var string; line, character: var int;
                  newName: var string) =
-  for k, v in pairs(root):
-    if k == "params":
-      for k2, v2 in pairs(v):
-        case k2
-        of "textDocument":
-          for k3, v3 in pairs(v2):
-            if k3 == "uri": uri = v3.getStr
-        of "position":
-          for k3, v3 in pairs(v2):
-            case k3
-            of "line": line = int(v3.getInt)
-            of "character": character = int(v3.getInt)
-            else: discard
-        of "newName": newName = v2.getStr
-        else: discard
+  parseDocPos(root, uri, line, character)
+  newName = getStr(root{"params"}{"newName"})
 
-proc parseLensData(root: JsonNode; uri: var string; line, character: var int) =
+proc parseDataPos(d: JsonValue; uri: var string; line, character: var int) =
+  uri = uriOf(d{"uri"})
+  line = jInt(d{"line"})
+  character = jInt(d{"character"})
+
+proc parseLensData(root: JsonValue; uri: var string; line, character: var int) =
   ## codeLens/resolve: params is a CodeLens whose `data` field holds the
   ## {uri,line,character} we stashed when producing the lens.
-  for k, v in pairs(root):
-    if k == "params":
-      for k2, v2 in pairs(v):
-        if k2 == "data":
-          for k3, v3 in pairs(v2):
-            case k3
-            of "uri": uri = v3.getStr
-            of "line": line = int(v3.getInt)
-            of "character": character = int(v3.getInt)
-            else: discard
+  parseDataPos(root{"params"}{"data"}, uri, line, character)
 
-proc parseCallItemData(root: JsonNode; uri: var string; line, character: var int) =
+proc parseCallItemData(root: JsonValue; uri: var string; line, character: var int) =
   ## callHierarchy/incomingCalls|outgoingCalls: params.item.data holds the
   ## {uri,line,character} we stashed in the CallHierarchyItem.
-  for k, v in pairs(root):
-    if k == "params":
-      for k2, v2 in pairs(v):
-        if k2 == "item":
-          for k3, v3 in pairs(v2):
-            if k3 == "data":
-              for k4, v4 in pairs(v3):
-                case k4
-                of "uri": uri = v4.getStr
-                of "line": line = int(v4.getInt)
-                of "character": character = int(v4.getInt)
-                else: discard
+  parseDataPos(root{"params"}{"item"}{"data"}, uri, line, character)
 
-proc parseQuery(root: JsonNode; query: var string) =
-  for k, v in pairs(root):
-    if k == "params":
-      for k2, v2 in pairs(v):
-        if k2 == "query": query = v2.getStr
+proc parseQuery(root: JsonValue; query: var string) =
+  query = getStr(root{"params"}{"query"})
 
-proc parseSelectionPositions(root: JsonNode; uri: var string;
+proc parseSelectionPositions(root: JsonValue; uri: var string;
                              positions: var seq[Position]) =
-  for k, v in pairs(root):
-    if k == "params":
-      for k2, v2 in pairs(v):
-        if k2 == "textDocument":
-          for k3, v3 in pairs(v2):
-            if k3 == "uri": uri = v3.getStr
-        elif k2 == "positions":
-          for el in items(v2):
-            var line = 0
-            var ch = 0
-            for k3, v3 in pairs(el):
-              case k3
-              of "line": line = int(v3.getInt)
-              of "character": ch = int(v3.getInt)
-              else: discard
-            positions.add pos(line, ch)
+  let p = root{"params"}
+  uri = uriOf(p{"textDocument"}{"uri"})
+  for el in items(p{"positions"}):
+    positions.add pos(jInt(el{"line"}), jInt(el{"character"}))
 
 # ── responses ────────────────────────────────────────────────────────────────
 
@@ -228,7 +144,7 @@ proc sendResult(idJson, resultJson: string) =
     resultJson & "}")
 
 proc sendNotification(meth, paramsJson: string) =
-  writeMessage("{\"jsonrpc\":\"2.0\",\"method\":" & kjson.jStr(meth) &
+  writeMessage("{\"jsonrpc\":\"2.0\",\"method\":" & jStr(meth) &
     ",\"params\":" & paramsJson & "}")
 
 proc locationsJson(locs: seq[Location]): string =
@@ -276,7 +192,7 @@ proc publishFor(s: ServerState; file: string) =
   for i in 0 ..< order.len:
     let uri = order[i]
     sendNotification("textDocument/publishDiagnostics",
-      "{\"uri\":" & kjson.jStr(uri) & ",\"diagnostics\":[" &
+      "{\"uri\":" & jStr(uri) & ",\"diagnostics\":[" &
       byUri.getOrDefault(uri, "") & "]}")
 
 proc documentDiagnosticReport(s: ServerState; file: string): string =
@@ -335,19 +251,16 @@ proc sourceLine(s: ServerState; uri: string; lineNo: int): string =
 
 proc handle(s: var ServerState; body: string; shouldExit: var bool) =
   if body.len == 0: return
-  var tree = default(JsonTree)
-  try:
-    tree = parseJson(body)
-  except:
-    return
+  let tree = parseJsonOrNull(body)
+  if tree == nil: return
   var meth = ""
   var hasId = false
   var idJson = "null"
-  parseHeader(tree.root, meth, hasId, idJson)
+  parseHeader(tree, meth, hasId, idJson)
   case meth
   of "initialize":
     var rootUri = ""
-    parseInitialize(tree.root, rootUri, s.config)
+    parseInitialize(tree, rootUri, s.config)
     s.rootUri = rootUri
     if rootUri.len > 0:
       s.config.projectRoot = uriToPath(rootUri)
@@ -356,7 +269,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var legend = "["
     for i in 0 ..< semTokenTypes.len:
       if i > 0: legend.add ","
-      legend.add kjson.jStr(semTokenTypes[i])
+      legend.add jStr(semTokenTypes[i])
     legend.add "]"
     sendResult(idJson, "{\"capabilities\":{" &
       "\"textDocumentSync\":1," &
@@ -398,7 +311,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var langId = ""
     var text = ""
     var version = 0
-    parseDidOpen(tree.root, uri, langId, text, version)
+    parseDidOpen(tree, uri, langId, text, version)
     if uri.len > 0:
       openDoc(s, uri, langId, version, text)
       publishFor(s, uriToPath(uri))
@@ -406,7 +319,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var uri = ""
     var text = ""
     var version = 0
-    parseDidChange(tree.root, uri, text, version)
+    parseDidChange(tree, uri, text, version)
     if uri.len > 0 and hasDoc(s, uri):
       var d = s.docs.getOrDefault(uri)
       setText(d, version, text)
@@ -414,22 +327,22 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
       publishFor(s, uriToPath(uri))
   of "textDocument/didSave":
     var uri = ""
-    parseUriOnly(tree.root, uri)
+    parseUriOnly(tree, uri)
     if uri.len > 0:
       publishFor(s, uriToPath(uri))
   of "textDocument/didClose":
     var uri = ""
-    parseUriOnly(tree.root, uri)
+    parseUriOnly(tree, uri)
     if uri.len > 0:
       closeDoc(s, uri)
       sendNotification("textDocument/publishDiagnostics",
-        "{\"uri\":" & kjson.jStr(uri) & ",\"diagnostics\":[]}")
-      pruneCaches(s.config)   # bound the per-module nimcache pool
+        "{\"uri\":" & jStr(uri) & ",\"diagnostics\":[]}")
+      pruneCaches(s.config)   # bound the per-module cache pool
   of "textDocument/definition":
     var uri = ""
     var line = 0
     var ch = 0
-    parseDocPos(tree.root, uri, line, ch)
+    parseDocPos(tree, uri, line, ch)
     if hasId:
       let locs = definition(s.config, uriToPath(uri), pos(line, ch), docText(s, uri))
       sendResult(idJson, locationsJson(locs))
@@ -437,7 +350,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var uri = ""
     var line = 0
     var ch = 0
-    parseDocPos(tree.root, uri, line, ch)
+    parseDocPos(tree, uri, line, ch)
     if hasId:
       let locs = references(s.config, uriToPath(uri), pos(line, ch), openDocuments(s), docText(s, uri))
       sendResult(idJson, locationsJson(locs))
@@ -445,9 +358,9 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var uri = ""
     var line = 0
     var ch = 0
-    parseDocPos(tree.root, uri, line, ch)
+    parseDocPos(tree, uri, line, ch)
     if hasId:
-      # Show the definition's source line (nimony's --def leaves the sig field
+      # Show the definition's source line (aowlmony's --def leaves the sig field
       # empty, so the declaration line itself is the useful tooltip).
       let locs = definition(s.config, uriToPath(uri), pos(line, ch), docText(s, uri))
       if locs.len > 0:
@@ -458,21 +371,21 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
         let dline = if rendered.len > 0: rendered
                     else: strip(sourceLine(s, locs[0].uri, locs[0].rng.start.line))
         if dline.len > 0:
-          let md = "```nim\n" & dline & "\n```"
+          let md = "```aowl\n" & dline & "\n```"
           sendResult(idJson,
-            "{\"contents\":{\"kind\":\"markdown\",\"value\":" & kjson.jStr(md) & "}}")
+            "{\"contents\":{\"kind\":\"markdown\",\"value\":" & jStr(md) & "}}")
         else:
           sendResult(idJson, "null")
       else:
         sendResult(idJson, "null")
   of "textDocument/declaration", "textDocument/typeDefinition",
      "textDocument/implementation":
-    # Best-effort: nimony idetools resolves the definition; declaration/type/impl
+    # Best-effort: aowlmony idetools resolves the definition; declaration/type/impl
     # all fall back to it.
     var uri = ""
     var line = 0
     var ch = 0
-    parseDocPos(tree.root, uri, line, ch)
+    parseDocPos(tree, uri, line, ch)
     if hasId:
       let locs = definition(s.config, uriToPath(uri), pos(line, ch), docText(s, uri))
       sendResult(idJson, locationsJson(locs))
@@ -480,26 +393,26 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var uri = ""
     var line = 0
     var ch = 0
-    parseDocPos(tree.root, uri, line, ch)
+    parseDocPos(tree, uri, line, ch)
     if hasId:
       let wlen = docWordLen(s, uri, pos(line, ch))
       sendResult(idJson, documentHighlightsJson(s.config, uriToPath(uri), uri,
         pos(line, ch), wlen, docText(s, uri)))
   of "textDocument/documentSymbol":
     var uri = ""
-    parseUriOnly(tree.root, uri)
+    parseUriOnly(tree, uri)
     if hasId:
       sendResult(idJson, documentSymbols(s.config, uriToPath(uri)))
   of "workspace/symbol":
     var query = ""
-    parseQuery(tree.root, query)
+    parseQuery(tree, query)
     if hasId:
       sendResult(idJson, workspaceSymbols(s.config, query))
   of "textDocument/completion":
     var uri = ""
     var line = 0
     var ch = 0
-    parseDocPos(tree.root, uri, line, ch)
+    parseDocPos(tree, uri, line, ch)
     if hasId:
       sendResult(idJson, completions(s.config, uriToPath(uri), line, ch,
         docText(s, uri)))
@@ -508,8 +421,8 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var loLine = 0
     var hiLine = 1000000000
     var only: seq[string] = @[]
-    parseCodeActionRange(tree.root, uri, loLine, hiLine)
-    parseCodeActionOnly(tree.root, only)
+    parseCodeActionRange(tree, uri, loLine, hiLine)
+    parseCodeActionOnly(tree, only)
     if hasId:
       let buf = docText(s, uri)
       # quickfix actions (range-scoped) unless the client asked ONLY for source.*
@@ -541,25 +454,25 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
       sendResult(idJson, arr)
   of "textDocument/semanticTokens/full":
     var uri = ""
-    parseUriOnly(tree.root, uri)
+    parseUriOnly(tree, uri)
     if hasId:
       sendResult(idJson, semanticTokensFull(s.config, uriToPath(uri)))
   of "textDocument/foldingRange":
     var uri = ""
-    parseUriOnly(tree.root, uri)
+    parseUriOnly(tree, uri)
     if hasId:
       sendResult(idJson, foldingRanges(docText(s, uri)))
   of "textDocument/selectionRange":
     var uri = ""
     var positions: seq[Position] = @[]
-    parseSelectionPositions(tree.root, uri, positions)
+    parseSelectionPositions(tree, uri, positions)
     if hasId:
       sendResult(idJson, selectionRanges(docText(s, uri), positions))
   of "textDocument/prepareRename":
     var uri = ""
     var line = 0
     var ch = 0
-    parseDocPos(tree.root, uri, line, ch)
+    parseDocPos(tree, uri, line, ch)
     if hasId:
       let wlen = docWordLen(s, uri, pos(line, ch))
       if wlen > 0:
@@ -571,7 +484,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var line = 0
     var ch = 0
     var newName = ""
-    parseRename(tree.root, uri, line, ch, newName)
+    parseRename(tree, uri, line, ch, newName)
     if hasId:
       let wlen = docWordLen(s, uri, pos(line, ch))
       if wlen > 0 and newName.len > 0:
@@ -583,13 +496,13 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var uri = ""
     var line = 0
     var ch = 0
-    parseDocPos(tree.root, uri, line, ch)
+    parseDocPos(tree, uri, line, ch)
     if hasId:
       sendResult(idJson, signatureHelpJson(s.config, uriToPath(uri),
         line, ch, docText(s, uri)))
   of "textDocument/codeLens":
     var uri = ""
-    parseUriOnly(tree.root, uri)
+    parseUriOnly(tree, uri)
     if hasId:
       sendResult(idJson, codeLensesJson(s.config, uriToPath(uri), uri))
   of "codeLens/resolve":
@@ -597,7 +510,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var uri = ""
     var line = 0
     var ch = 0
-    parseLensData(tree.root, uri, line, ch)
+    parseLensData(tree, uri, line, ch)
     if hasId:
       if uri.len > 0:
         sendResult(idJson, resolveCodeLensJson(s.config, uri, line, ch,
@@ -606,7 +519,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
         sendResult(idJson, "null")
   of "textDocument/documentLink":
     var uri = ""
-    parseUriOnly(tree.root, uri)
+    parseUriOnly(tree, uri)
     if hasId:
       sendResult(idJson, documentLinksJson(s.config, uriToPath(uri),
         docText(s, uri)))
@@ -614,25 +527,25 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var uri = ""
     var loLine = 0
     var hiLine = 1000000000
-    parseCodeActionRange(tree.root, uri, loLine, hiLine)
+    parseCodeActionRange(tree, uri, loLine, hiLine)
     if hasId:
       sendResult(idJson, inlayHintsJson(s.config, uriToPath(uri),
         docText(s, uri)))
   of "textDocument/formatting":
     var uri = ""
-    parseUriOnly(tree.root, uri)
+    parseUriOnly(tree, uri)
     if hasId:
       sendResult(idJson, formattingEdits(s.config, docText(s, uri)))
   of "textDocument/diagnostic":
     var uri = ""
-    parseUriOnly(tree.root, uri)
+    parseUriOnly(tree, uri)
     if hasId:
       sendResult(idJson, documentDiagnosticReport(s, uriToPath(uri)))
   of "textDocument/prepareCallHierarchy":
     var uri = ""
     var line = 0
     var ch = 0
-    parseDocPos(tree.root, uri, line, ch)
+    parseDocPos(tree, uri, line, ch)
     if hasId:
       sendResult(idJson, prepareCallHierarchy(s.config, uriToPath(uri),
         pos(line, ch), docText(s, uri)))
@@ -640,7 +553,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var uri = ""
     var line = 0
     var ch = 0
-    parseCallItemData(tree.root, uri, line, ch)
+    parseCallItemData(tree, uri, line, ch)
     if hasId:
       if uri.len > 0:
         sendResult(idJson, incomingCallsJson(s.config, uri, line, ch,
@@ -651,7 +564,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var uri = ""
     var line = 0
     var ch = 0
-    parseCallItemData(tree.root, uri, line, ch)
+    parseCallItemData(tree, uri, line, ch)
     if hasId:
       if uri.len > 0:
         sendResult(idJson, outgoingCallsJson(s.config, uri, line, ch,
@@ -662,7 +575,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var uri = ""
     var line = 0
     var ch = 0
-    parseDocPos(tree.root, uri, line, ch)
+    parseDocPos(tree, uri, line, ch)
     if hasId:
       sendResult(idJson, prepareTypeHierarchy(s.config, uriToPath(uri),
         pos(line, ch), docText(s, uri)))
@@ -670,7 +583,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var uri = ""
     var line = 0
     var ch = 0
-    parseCallItemData(tree.root, uri, line, ch)
+    parseCallItemData(tree, uri, line, ch)
     if hasId:
       if uri.len > 0:
         sendResult(idJson, supertypesJson(s.config, uri, line, ch))
@@ -680,7 +593,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var uri = ""
     var line = 0
     var ch = 0
-    parseCallItemData(tree.root, uri, line, ch)
+    parseCallItemData(tree, uri, line, ch)
     if hasId:
       if uri.len > 0:
         sendResult(idJson, subtypesJson(s.config, uri, line, ch))
@@ -690,7 +603,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
     var uri = ""
     var loLine = 0
     var hiLine = 1000000000
-    parseCodeActionRange(tree.root, uri, loLine, hiLine)
+    parseCodeActionRange(tree, uri, loLine, hiLine)
     if hasId:
       sendResult(idJson, rangeFormattingEdits(s.config, docText(s, uri),
         loLine, hiLine))
@@ -699,6 +612,7 @@ proc handle(s: var ServerState; body: string; shouldExit: var bool) =
       sendResult(idJson, "null")
 
 proc main(): int =
+  setBinaryStdio()
   var s = newServerState()
   var body = ""
   var shouldExit = false

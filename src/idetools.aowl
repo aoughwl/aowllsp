@@ -1,4 +1,4 @@
-## idetools.nim — goto-definition / find-references via `nimony check --def/--usages`.
+## idetools.aowl — goto-definition / find-references via `aowlmony check --def/--usages`.
 ##
 ## Record (tab-separated):
 ##   def|use \t symkind \t sym \t sig \t container \t file \t line \t col
@@ -32,9 +32,10 @@ proc parseRecord(line: string): Rec =
   result.valid = ok1 and ok2
 
 proc absPathOf(cfg: Config; p: string): string =
-  if p.len > 0 and p[0] == '/': return p
+  let q = normPath(p)
+  if isAbsPath(q): return q
   let root = if cfg.projectRoot.len > 0: cfg.projectRoot else: "."
-  result = root & "/" & p
+  result = root & "/" & q
 
 proc toLocation(cfg: Config; r: Rec): Location =
   let l = max(0, r.line - 1)

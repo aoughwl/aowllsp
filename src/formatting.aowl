@@ -1,4 +1,4 @@
-## formatting.nim — textDocument/formatting, delegated to the aowlfmt binary.
+## formatting.aowl — textDocument/formatting, delegated to the aowlfmt binary.
 ##
 ## aowllsp does not format text itself; it pipes the live buffer through
 ## `aowlfmt --stdin` (the verified layout formatter) and returns a single
@@ -8,8 +8,7 @@
 
 import std/[strutils, syncio]
 import protocol, state
-import aowlkit/json as ajson
-import aowlkit/subprocess
+import util
 
 proc lineCount(text: string): int =
   ## Number of lines, so we can build a range that covers the whole document.
@@ -31,7 +30,7 @@ proc formattingEdits*(cfg: Config; bufferText: string): string =
   let endLine = lineCount(bufferText)
   let rng = mkRange(0, 0, endLine, 0)
   result = "[{\"range\":" & rangeJson(rng) & ",\"newText\":" &
-    ajson.jStr(formatted) & "}]"
+    jStr(formatted) & "}]"
 
 proc rangeFormattingEdits*(cfg: Config; bufferText: string;
                            loLine, hiLine: int): string =
@@ -48,4 +47,4 @@ proc rangeFormattingEdits*(cfg: Config; bufferText: string;
   let endLine = lineCount(bufferText)
   let rng = mkRange(0, 0, endLine, 0)
   result = "[{\"range\":" & rangeJson(rng) & ",\"newText\":" &
-    ajson.jStr(formatted) & "}]"
+    jStr(formatted) & "}]"

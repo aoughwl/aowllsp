@@ -1,36 +1,40 @@
 #!/usr/bin/env bash
-# Build aowllsp with the Nimony compiler. It links the shared aowlkit library
-# (via -p:) and shells out to `nimony` at runtime; no other deps.
+# Build bin/aowllsp.exe with the aowlmony compiler.
+#
+#   bash build.sh
+#
+# Overrides: AOWLMONY_ROOT (toolchain root; default ~/dev/toolchain/aowlmony/root),
+#            AOWLJSONREF   (jsonref src dir; default ~/dev/jsonref/src).
+#
+# The compiler writes its exe into nimcache/<hash>/ and exits 0 even when it
+# produced nothing, so "no exe found" is the failure signal. The cached exe is
+# deleted before each attempt so a failed build can never ship a stale one. The
+# compiler's cache is shared, so a spurious failure gets exactly one retry.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-NIMONY="${NIMONY:-$HOME/nimony/bin/nimony}"
-AOWLKIT="${AOWLKIT:-$HOME/aowlkit/src}"
-LOCK="${NIMONY_BUILD_LOCK:-$HOME/.nimony-build.lock}"
-cd "$ROOT"
-
-build() {
-  "$NIMONY" c --base:src -p:"$AOWLKIT" -d:nimony src/aowllsp.nim 2>&1
-}
-
-run_locked() {
-  if command -v flock >/dev/null 2>&1; then
-    exec 9>"$LOCK"; flock 9
-  fi
-  build
-}
-
-log="$(run_locked)"; rc=$?
-if [ $rc -ne 0 ] || grep -qE '(^|[^a-zA-Z])Error:' <<<"$log"; then
-  echo "$log" | grep -E 'Error:' | head -30
-  echo "BUILD-FAIL"; echo "BUILD-DONE"; exit 1
+AOWLMONY_ROOT="${AOWLMONY_ROOT:-$HOME/dev/toolchain/aowlmony/root}"
+JSONREF="${AOWLJSONREF:-$HOME/dev/jsonref/src}"
+COMPILER="$AOWLMONY_ROOT/bin/aowlmony.exe"
+[[ -x "$COMPILER" ]] || { echo "build.sh: no compiler at $COMPILER" >&2; echo BUILD-FAIL; exit 1; }
+[[ -d "$JSONREF" ]] || { echo "build.sh: no jsonref dir at $JSONREF" >&2; echo BUILD-FAIL; exit 1; }
+if command -v cygpath >/dev/null 2>&1; then
+  export AOWLMONY_ROOT="$(cygpath -w "$AOWLMONY_ROOT")"
+  JSONREF="$(cygpath -m "$JSONREF")"
 fi
-mkdir -p bin
-exe="$(find nimcache -type f -name aowllsp -executable -printf '%T@ %p\n' 2>/dev/null \
-       | sort -rn | head -1 | cut -d' ' -f2-)"
-if [ -z "${exe:-}" ]; then
-  echo "build.sh: could not locate built aowllsp in nimcache/" >&2
-  echo "BUILD-FAIL"; echo "BUILD-DONE"; exit 1
+mkdir -p "$ROOT/bin"
+cd "$ROOT/src"
+ok=0
+for attempt in 1 2; do
+  rm -f nimcache/*/aowllsp.exe 2>/dev/null || true
+  "$COMPILER" c -d:release --path:"$JSONREF" --path:. aowllsp.aowl >"$ROOT/bin/build.log" 2>&1 || true
+  exe="$(ls -t nimcache/*/aowllsp.exe 2>/dev/null | head -1 || true)"
+  if [[ -n "$exe" ]]; then cp "$exe" "$ROOT/bin/aowllsp.exe"; ok=1; break; fi
+done
+if [[ $ok -eq 1 ]]; then
+  rm -f "$ROOT/bin/build.log"
+  echo "built bin/aowllsp.exe"; echo "BUILD-OK"
+else
+  grep -E 'Error' "$ROOT/bin/build.log" | head -30 >&2
+  echo "build.sh: no executable produced (see bin/build.log)" >&2
+  echo BUILD-FAIL; exit 1
 fi
-cp "$exe" bin/aowllsp
-echo "built bin/aowllsp"
-echo "BUILD-OK"; echo "BUILD-DONE"
